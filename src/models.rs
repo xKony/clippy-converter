@@ -15,6 +15,12 @@ pub struct Config {
     pub hotkey: String,
     /// Maximum number of conversion results to show.
     pub list_size: usize,
+    /// Whether to log conversions to a file.
+    pub history_enabled: bool,
+    /// Interval for refreshing fiat currency rates in minutes.
+    pub fiat_update_interval_mins: u64,
+    /// Interval for refreshing cryptocurrency rates in minutes.
+    pub crypto_update_interval_mins: u64,
 }
 
 impl Default for Config {
@@ -28,6 +34,9 @@ impl Default for Config {
             ],
             hotkey: "Shift+Alt+C".to_string(),
             list_size: 10,
+            history_enabled: false,
+            fiat_update_interval_mins: 1440, // Daily
+            crypto_update_interval_mins: 1, // Every minute
         }
     }
 }
@@ -68,9 +77,6 @@ pub struct Cache {
     pub last_updated: DateTime<Utc>,
 }
 
-/// Interval after which the cache is considered expired (8 hours).
-const REFRESH_INTERVAL_HOURS: i64 = 8;
-
 impl Default for Cache {
     fn default() -> Self {
         Self {
@@ -106,15 +112,18 @@ impl Cache {
         save_json(&path, self)
     }
 
-    /// Returns true if the cache is older than the refresh interval or empty.
+    /// Returns true if the cache is older than the configured refresh intervals or empty.
     #[must_use]
-    pub fn is_expired(&self) -> bool {
+    pub fn is_expired(&self, config: &Config) -> bool {
         if self.rates.is_empty() {
             return true;
         }
         let now = Utc::now();
         let duration = now.signed_duration_since(self.last_updated);
-        duration.num_hours() >= REFRESH_INTERVAL_HOURS
+        
+        let min_interval = config.fiat_update_interval_mins.min(config.crypto_update_interval_mins);
+        let min_interval_i64: i64 = min_interval.try_into().unwrap_or(i64::MAX);
+        duration.num_minutes() >= min_interval_i64
     }
 }
 /// Represents a single conversion result.
@@ -198,13 +207,15 @@ mod tests {
     #[test]
     fn test_cache_is_expired() {
         let mut cache = Cache::default();
-        assert!(cache.is_expired(), "Default/empty cache should be expired");
+        let config = Config::default();
+        assert!(cache.is_expired(&config), "Default/empty cache should be expired");
 
         cache.rates.insert("USD".to_string(), 1.0);
         cache.last_updated = Utc::now();
-        assert!(!cache.is_expired(), "Fresh cache should not be expired");
+        assert!(!cache.is_expired(&config), "Fresh cache should not be expired");
 
-        cache.last_updated = Utc::now() - chrono::Duration::hours(REFRESH_INTERVAL_HOURS + 1);
-        assert!(cache.is_expired(), "Old cache should be expired");
+        // Use a value large enough to exceed default intervals
+        cache.last_updated = Utc::now() - chrono::Duration::hours(25);
+        assert!(cache.is_expired(&config), "Old cache should be expired");
     }
 }

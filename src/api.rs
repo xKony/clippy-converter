@@ -44,8 +44,9 @@ pub async fn fetch_latest_rates() -> Result<HashMap<String, f64>> {
 /// Returns an error if the cache cannot be loaded/saved or if the network fetch fails.
 pub async fn refresh_cache_if_needed() -> Result<()> {
     let mut cache = Cache::load().context("Failed to load currency cache")?;
+    let config = crate::models::Config::load().unwrap_or_default();
 
-    if cache.is_expired() {
+    if cache.is_expired(&config) {
         println!("Refreshing currency rates...");
         let rates = fetch_latest_rates().await?;
         cache.rates = rates;

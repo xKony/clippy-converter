@@ -6,7 +6,7 @@ use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use tray_icon::{TrayIcon, TrayIconBuilder, menu::{Menu, MenuItem, MenuEvent}};
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ pub struct State {
     pub captured_value: f64,
     pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
+    pub settings_window_id: Option<window::Id>,
     pub search_query: String,
     pub tray_icon: TrayIcon,
 }
@@ -31,6 +32,8 @@ pub enum Message {
     HotkeyTriggered,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    SettingsWindowOpened(window::Id),
+    SettingsWindowClosed(window::Id),
     CurrencyCacheRefreshed(Cache),
     Tick,
     SearchChanged(String),
@@ -38,6 +41,13 @@ pub enum Message {
     ToggleFavorite(String),
     Swap(f64, String),
     CloseWindow,
+    OpenSettings,
+    ToggleHistory(bool),
+    OpenHistoryFolder,
+    FiatIntervalChanged(String),
+    CryptoIntervalChanged(String),
+    HotkeyInputChanged(String),
+    SaveConfig,
     ExitRequested,
 }
 
@@ -62,6 +72,7 @@ pub fn boot() -> (State, Task<Message>) {
 
     // Tray Icon
     let tray_menu = Menu::with_items(&[
+        &MenuItem::with_id("settings", "Settings", true, None),
         &MenuItem::with_id("quit", "Quit Clippy Converter", true, None),
     ]).expect("Failed to create tray menu");
 
@@ -84,6 +95,7 @@ pub fn boot() -> (State, Task<Message>) {
             captured_value: 0.0,
             captured_unit: None,
             window_id: None,
+            settings_window_id: None,
             search_query: String::new(),
             tray_icon,
         },
@@ -91,18 +103,17 @@ pub fn boot() -> (State, Task<Message>) {
     )
 }
 
+#[allow(clippy::too_many_lines, reason = "Centralized update logic for complex UI state")]
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::HotkeyTriggered => handle_hotkey(state),
-        Message::WindowOpened(id) => {
-            println!("Window opened with ID: {id:?}");
-            state.window_id = Some(id);
+        Message::SettingsWindowOpened(id) => {
+            state.settings_window_id = Some(id);
             Task::none()
         }
-        Message::WindowClosed(id) => {
-            println!("Window closed with ID: {id:?}");
-            if state.window_id == Some(id) {
-                state.window_id = None;
+        Message::SettingsWindowClosed(id) => {
+            if state.settings_window_id == Some(id) {
+                state.settings_window_id = None;
             }
             Task::none()
         }
@@ -121,6 +132,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.current_result = Some(result);
                 state.captured_unit = Some(unit);
                 state.search_query = String::new();
+                log_conversion_if_enabled(state);
             }
             Task::none()
         }
@@ -138,13 +150,82 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Ok(result) = state.converter.convert(value, &unit) {
                 state.current_result = Some(result);
                 state.search_query = String::new();
+                log_conversion_if_enabled(state);
             }
             Task::none()
         }
         Message::CloseWindow => {
             state.window_id.map_or_else(Task::none, window::close)
         }
+        Message::OpenSettings => {
+            if state.settings_window_id.is_some() {
+                return Task::none();
+            }
+            let (_, open_task) = window::open(window::Settings {
+                size: (400.0, 500.0).into(),
+                decorations: true,
+                ..Default::default()
+            });
+            open_task.map(Message::SettingsWindowOpened)
+        }
+        Message::ToggleHistory(enabled) => {
+            state.config.history_enabled = enabled;
+            Task::none()
+        }
+        Message::OpenHistoryFolder => {
+            if let Ok(path) = crate::history::get_history_path() 
+                && let Some(parent) = path.parent() {
+                let _ = open::that(parent);
+            }
+            Task::none()
+        }
+        Message::FiatIntervalChanged(val) => {
+            if let Ok(mins) = val.parse::<u64>() {
+                state.config.fiat_update_interval_mins = mins.max(1);
+            }
+            Task::none()
+        }
+        Message::CryptoIntervalChanged(val) => {
+            if let Ok(mins) = val.parse::<u64>() {
+                state.config.crypto_update_interval_mins = mins.max(1);
+            }
+            Task::none()
+        }
+        Message::HotkeyInputChanged(val) => {
+            state.config.hotkey = val;
+            Task::none()
+        }
+        Message::SaveConfig => {
+            let _ = state.config.save();
+            // Re-register hotkey if it changed
+            if let Ok(hk) = hotkey::parse_hotkey(&state.config.hotkey)
+                && hk != state.hotkey_id {
+                let _ = state.hotkey_manager.unregister(state.hotkey_id);
+                if state.hotkey_manager.register(hk).is_ok() {
+                    state.hotkey_id = hk;
+                }
+            }
+            Task::none()
+        }
         Message::ExitRequested => iced::exit(),
+        _ => Task::none(),
+    }
+}
+
+fn log_conversion_if_enabled(state: &State) {
+    if state.config.history_enabled
+        && let Some(result) = &state.current_result {
+        // Log first output as representative
+        if let Some(first_output) = result.outputs.first() {
+            let input_val = result.input_value;
+            let input_unit = result.input_unit.clone();
+            let out_val = first_output.value;
+            let out_unit = first_output.unit.clone();
+            
+            tokio::spawn(async move {
+                let _ = crate::history::log_conversion(input_val, &input_unit, out_val, &out_unit).await;
+            });
+        }
     }
 }
 
@@ -156,13 +237,14 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             println!("Parsed value: {:.2}, unit: {:?}", parsed.value, parsed.unit);
             
             state.captured_value = parsed.value;
-            state.captured_unit = parsed.unit.clone();
+            state.captured_unit.clone_from(&parsed.unit);
             state.search_query = String::new();
 
             // Try to convert immediately if unit is present
             if let Some(ref unit) = parsed.unit {
                 if let Ok(result) = state.converter.convert(parsed.value, unit) {
                     state.current_result = Some(result);
+                    log_conversion_if_enabled(state);
                 } else {
                     state.current_result = None;
                 }
@@ -190,7 +272,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
 }
 
 fn handle_tick(state: &State) -> Task<Message> {
-    if state.cache.is_expired() {
+    if state.cache.is_expired(&state.config) {
         return Task::perform(crate::api::fetch_latest_rates(), |res| {
             res.map_or(Message::Tick, |rates| {
                 let mut cache = Cache::load().unwrap_or_default();
@@ -204,11 +286,16 @@ fn handle_tick(state: &State) -> Task<Message> {
     Task::none()
 }
 
+#[allow(clippy::too_many_lines, reason = "View logic for multi-window application")]
+#[allow(clippy::option_if_let_else, reason = "if let Some is more readable for complex UI branching")]
 #[must_use]
-pub fn view(state: &State, _window_id: window::Id) -> Element<'_, Message> {
+pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
+    if state.settings_window_id == Some(window_id) {
+        return view_settings(state);
+    }
+
+    let search_query_lower = state.search_query.to_lowercase();
     let content = if let Some(result) = &state.current_result {
-        let search_query_lower = state.search_query.to_lowercase();
-        
         column![
             row![
                 text(format!("{:.2} {}", result.input_value, result.input_unit))
@@ -279,7 +366,6 @@ pub fn view(state: &State, _window_id: window::Id) -> Element<'_, Message> {
         .spacing(15)
         .align_x(Alignment::Start)
     } else {
-        let search_query_lower = state.search_query.to_lowercase();
         let all_units = state.converter.get_all_units();
         
         column![
@@ -353,7 +439,7 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         })
     });
 
-    let tick_sub = iced::time::every(Duration::from_secs(3600)).map(|_| Message::Tick);
+    let tick_sub = iced::time::every(Duration::from_secs(60)).map(|_| Message::Tick);
 
     let keyboard_sub = iced::keyboard::on_key_press(|key, _modifiers| {
         match key {
@@ -368,9 +454,13 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         iced::stream::channel(100, |mut output| async move {
             let receiver = MenuEvent::receiver();
             loop {
-                if let Ok(event) = receiver.try_recv() && event.id == "quit" {
+                if let Ok(event) = receiver.try_recv() {
                     use iced::futures::SinkExt;
-                    let _ = output.send(Message::ExitRequested).await;
+                    match event.id.0.as_str() {
+                        "quit" => { let _ = output.send(Message::ExitRequested).await; }
+                        "settings" => { let _ = output.send(Message::OpenSettings).await; }
+                        _ => {}
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -378,4 +468,67 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
     });
 
     Subscription::batch(vec![hotkey_sub, tick_sub, keyboard_sub, tray_sub])
+}
+
+fn view_settings(state: &State) -> Element<'_, Message> {
+    let content = column![
+        text("Settings").size(24).color(Color::WHITE),
+        
+        column![
+            text("Global Hotkey").size(16).color(Color::from_rgb8(200, 200, 200)),
+            text_input("e.g. Shift+Alt+C", &state.config.hotkey)
+                .on_input(Message::HotkeyInputChanged)
+                .padding(10),
+        ].spacing(5),
+
+        column![
+            checkbox("Enable History Logging", state.config.history_enabled)
+                .on_toggle(Message::ToggleHistory)
+                .size(20),
+            button(text("Open History Folder").color(Color::WHITE))
+                .on_press(Message::OpenHistoryFolder)
+                .padding(10)
+                .style(button::secondary),
+        ].spacing(10),
+
+        column![
+            text("Update Intervals (minutes)").size(16).color(Color::from_rgb8(200, 200, 200)),
+            row![
+                column![
+                    text("Fiat").size(12).color(Color::from_rgb8(150, 150, 150)),
+                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())
+                        .on_input(Message::FiatIntervalChanged)
+                        .padding(10),
+                ].width(Length::Fill),
+                column![
+                    text("Crypto").size(12).color(Color::from_rgb8(150, 150, 150)),
+                    text_input("1", &state.config.crypto_update_interval_mins.to_string())
+                        .on_input(Message::CryptoIntervalChanged)
+                        .padding(10),
+                ].width(Length::Fill),
+            ].spacing(20),
+            text("Note: Crypto defaults to 1 min, Fiat to 24h (1440 min).")
+                .size(12)
+                .color(Color::from_rgb8(100, 100, 100)),
+        ].spacing(5),
+
+        button(text("Save & Apply").color(Color::WHITE))
+            .on_press(Message::SaveConfig)
+            .padding(12)
+            .width(Length::Fill)
+            .style(button::primary),
+    ]
+    .spacing(25)
+    .padding(20);
+
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme: &Theme| {
+            container::Style {
+                background: Some(Color::from_rgb8(30, 30, 30).into()),
+                ..Default::default()
+            }
+        })
+        .into()
 }

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod clipboard;
 pub mod converter;
+pub mod history;
 pub mod hotkey;
 pub mod models;
 pub mod parser;
