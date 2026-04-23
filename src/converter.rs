@@ -180,7 +180,12 @@ impl Converter {
 }
 
 /// Helper to add a unit definition to a hashmap.
-fn add_unit(map: &mut HashMap<String, UnitDefinition>, symbol: &str, category: UnitCategory, factor: f64) {
+fn add_unit(
+    map: &mut HashMap<String, UnitDefinition>,
+    symbol: &str,
+    category: UnitCategory,
+    factor: f64,
+) {
     map.insert(
         symbol.to_string(),
         UnitDefinition {
@@ -255,7 +260,7 @@ mod tests {
         let converter = Converter::new(config, cache);
 
         let res = converter.convert(1.0, "m").unwrap();
-        
+
         // Ensure "meter", "meters", "m" are not all present as outputs
         let m_count = res.outputs.iter().filter(|o| o.unit == "m").count();
         assert_eq!(m_count, 0, "Input unit should not be in output");

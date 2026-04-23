@@ -10,7 +10,7 @@ categories = ["development-tools"]
 
 [dependencies]
 anyhow = "1.0"
-iced = "0.13"
+iced = { version = "0.13", features = ["tokio"] }
 global-hotkey = "0.6"
 arboard = "3.4"
 enigo = "0.3"
