@@ -84,6 +84,15 @@ impl Db {
             .create(path)
             .context("Failed to initialize redb database")?;
 
+        // Ensure tables are created
+        let write_txn = db.begin_write().context("Failed to begin init transaction")?;
+        {
+            let _ = write_txn
+                .open_table(RATES_TABLE)
+                .context("Failed to create rates table")?;
+        }
+        write_txn.commit().context("Failed to commit init transaction")?;
+
         Ok(Self {
             inner: Arc::new(db),
         })

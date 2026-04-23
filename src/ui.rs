@@ -59,6 +59,7 @@ pub enum Message {
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     SaveConfig,
     ExitRequested,
+    SpawnWorkers,
 }
 
 /// Parameters for booting the UI.
@@ -128,7 +129,7 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
             is_recording_hotkey: false,
             recorded_hotkey: None,
         },
-        Task::none(),
+        Task::done(Message::SpawnWorkers),
     )
 }
 
@@ -138,6 +139,13 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
 )]
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        Message::SpawnWorkers => {
+            let db = state.db.clone();
+            let config = state.config.clone();
+            tokio::spawn(crate::workers::start_fiat_worker(db.clone(), config.clone()));
+            tokio::spawn(crate::workers::start_crypto_worker(db, config));
+            Task::none()
+        }
         Message::HotkeyTriggered => handle_hotkey(state),
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
