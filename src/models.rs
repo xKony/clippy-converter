@@ -68,11 +68,14 @@ pub struct Cache {
     pub last_updated: DateTime<Utc>,
 }
 
+/// Interval after which the cache is considered expired (8 hours).
+const REFRESH_INTERVAL_HOURS: i64 = 8;
+
 impl Default for Cache {
     fn default() -> Self {
         Self {
             rates: HashMap::new(),
-            last_updated: Utc::now(),
+            last_updated: DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now),
         }
     }
 }
@@ -97,13 +100,23 @@ impl Cache {
     /// Saves the cache to the user's cache directory.
     ///
     /// # Errors
-    /// Returns an error if the cache directory cannot be created or if the file cannot be written.
+    /// Returns an error if the cache directory cannot be created or if the file cannot be written.  
     pub fn save(&self) -> Result<()> {
         let path = get_cache_path()?;
         save_json(&path, self)
     }
-}
 
+    /// Returns true if the cache is older than the refresh interval or empty.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        if self.rates.is_empty() {
+            return true;
+        }
+        let now = Utc::now();
+        let duration = now.signed_duration_since(self.last_updated);
+        duration.num_hours() >= REFRESH_INTERVAL_HOURS
+    }
+}
 /// Represents a single conversion result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvertedValue {
@@ -180,5 +193,18 @@ mod tests {
         let json = serde_json::to_string(&cache).unwrap();
         let decoded: Cache = serde_json::from_str(&json).unwrap();
         assert_eq!(cache, decoded);
+    }
+
+    #[test]
+    fn test_cache_is_expired() {
+        let mut cache = Cache::default();
+        assert!(cache.is_expired(), "Default/empty cache should be expired");
+
+        cache.rates.insert("USD".to_string(), 1.0);
+        cache.last_updated = Utc::now();
+        assert!(!cache.is_expired(), "Fresh cache should not be expired");
+
+        cache.last_updated = Utc::now() - chrono::Duration::hours(REFRESH_INTERVAL_HOURS + 1);
+        assert!(cache.is_expired(), "Old cache should be expired");
     }
 }
