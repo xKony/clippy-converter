@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::time::Duration;
 
 pub mod api;
+pub mod clipboard;
 pub mod models;
 pub mod parser;
 
