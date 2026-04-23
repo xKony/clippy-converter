@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Result of a successful string parse.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,8 +12,8 @@ pub struct ParsedInput {
 /// Parses a string into a numeric value and an optional unit.
 ///
 /// This function attempts to extract a number and a unit from the input string.
-/// It supports various formats, including leading currency symbols, numbers 
-/// followed by units, and plain numbers. Whitespace is ignored between 
+/// It supports various formats, including leading currency symbols, numbers
+/// followed by units, and plain numbers. Whitespace is ignored between
 /// the number and the unit.
 ///
 /// # Errors
@@ -22,7 +22,7 @@ pub struct ParsedInput {
 /// # Examples
 /// ```
 /// use clippy_converter::parser::parse_input;
-/// 
+///
 /// let result = parse_input("$50.5").unwrap();
 /// assert_eq!(result.value, 50.5);
 /// assert_eq!(result.unit, Some("USD".to_string()));
@@ -91,7 +91,7 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
     let value: f64 = value_str
         .parse()
         .map_err(|_| anyhow!("Failed to parse numeric part: {value_str}"))?;
-    
+
     let unit_str = input[number_end..].trim();
     let unit = if unit_str.is_empty() {
         None
