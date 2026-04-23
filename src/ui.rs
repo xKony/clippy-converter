@@ -621,6 +621,7 @@ impl std::fmt::Display for HistoryRetention {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn view_settings(state: &State) -> Element<'_, Message> {
     let hotkey_label = if state.is_recording_hotkey {
         "Recording... (Esc to cancel)".to_string()

@@ -37,7 +37,7 @@ pub enum HistoryRetention {
 impl HistoryRetention {
     /// Returns the number of days for retention, or None if Never.
     #[must_use]
-    pub fn to_days(self) -> Option<i64> {
+    pub const fn to_days(self) -> Option<i64> {
         match self {
             Self::SevenDays => Some(7),
             Self::ThirtyDays => Some(30),

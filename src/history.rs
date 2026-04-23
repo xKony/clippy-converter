@@ -52,9 +52,8 @@ pub async fn log_conversion(
 
 /// Prunes history entries older than the specified number of days.
 async fn prune_history(path: &std::path::Path, days: i64) -> Result<()> {
-    let file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
-        Err(_) => return Ok(()), // File might not exist yet
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return Ok(());
     };
 
     let now = Utc::now();
