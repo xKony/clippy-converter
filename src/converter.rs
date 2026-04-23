@@ -90,6 +90,15 @@ impl Converter {
         }
     }
 
+    /// Returns a deduplicated list of all supported unit and currency symbols.
+    pub fn get_all_units(&self) -> Vec<String> {
+        let mut units: Vec<String> = self.units.keys().cloned().collect();
+        units.extend(self.cache.rates.keys().cloned());
+        units.sort();
+        units.dedup();
+        units
+    }
+
     /// Converts a numeric value from one unit to all compatible target units.
     ///
     /// # Errors

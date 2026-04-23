@@ -19,6 +19,8 @@ pub struct State {
     pub hotkey_manager: GlobalHotKeyManager,
     pub hotkey_id: global_hotkey::hotkey::HotKey,
     pub current_result: Option<ConversionResult>,
+    pub captured_value: f64,
+    pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
     pub search_query: String,
     pub tray_icon: TrayIcon,
@@ -32,6 +34,7 @@ pub enum Message {
     CurrencyCacheRefreshed(Cache),
     Tick,
     SearchChanged(String),
+    SelectSourceUnit(String),
     ToggleFavorite(String),
     Swap(f64, String),
     CloseWindow,
@@ -78,6 +81,8 @@ pub fn boot() -> (State, Task<Message>) {
             hotkey_manager,
             hotkey_id: hk,
             current_result: None,
+            captured_value: 0.0,
+            captured_unit: None,
             window_id: None,
             search_query: String::new(),
             tray_icon,
@@ -111,6 +116,14 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.search_query = query;
             Task::none()
         }
+        Message::SelectSourceUnit(unit) => {
+            if let Ok(result) = state.converter.convert(state.captured_value, &unit) {
+                state.current_result = Some(result);
+                state.captured_unit = Some(unit);
+                state.search_query = String::new();
+            }
+            Task::none()
+        }
         Message::ToggleFavorite(unit) => {
             if let Some(pos) = state.config.favorites.iter().position(|f| f == &unit) {
                 state.config.favorites.remove(pos);
@@ -141,25 +154,36 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
         println!("Captured text: '{text}'");
         if let Ok(parsed) = crate::parser::parse_input(&text) {
             println!("Parsed value: {:.2}, unit: {:?}", parsed.value, parsed.unit);
-            if let Ok(result) = state.converter.convert(parsed.value, parsed.unit.as_deref().unwrap_or("")) {
-                state.current_result = Some(result);
-                state.search_query = String::new();
-                
-                let (x, y) = state.enigo.location().unwrap_or((100, 100));
-                println!("Opening window at {x}, {y}");
-                
-                #[expect(clippy::cast_precision_loss, reason = "Screen coordinates fit in f32 mantissa")]
-                let (_, open_task) = window::open(window::Settings {
-                    size: (350.0, 400.0).into(),
-                    position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
-                    decorations: false,
-                    transparent: true,
-                    level: window::Level::AlwaysOnTop,
-                    ..Default::default()
-                });
-                
-                return open_task.map(Message::WindowOpened);
+            
+            state.captured_value = parsed.value;
+            state.captured_unit = parsed.unit.clone();
+            state.search_query = String::new();
+
+            // Try to convert immediately if unit is present
+            if let Some(ref unit) = parsed.unit {
+                if let Ok(result) = state.converter.convert(parsed.value, unit) {
+                    state.current_result = Some(result);
+                } else {
+                    state.current_result = None;
+                }
+            } else {
+                state.current_result = None;
             }
+
+            let (x, y) = state.enigo.location().unwrap_or((100, 100));
+            println!("Opening window at {x}, {y}");
+            
+            #[expect(clippy::cast_precision_loss, reason = "Screen coordinates fit in f32 mantissa")]
+            let (_, open_task) = window::open(window::Settings {
+                size: (350.0, 400.0).into(),
+                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
+                decorations: false,
+                transparent: true,
+                level: window::Level::AlwaysOnTop,
+                ..Default::default()
+            });
+            
+            return open_task.map(Message::WindowOpened);
         }
     }
     Task::none()
@@ -182,82 +206,119 @@ fn handle_tick(state: &State) -> Task<Message> {
 
 #[must_use]
 pub fn view(state: &State, _window_id: window::Id) -> Element<'_, Message> {
-    let content = state.current_result.as_ref().map_or_else(
-        || column![text("No conversion data").color(Color::WHITE)],
-        |result| {
-            let search_query_lower = state.search_query.to_lowercase();
-            
-            column![
-                row![
-                    text(format!("{:.2} {}", result.input_value, result.input_unit))
-                        .size(24)
-                        .color(Color::WHITE)
-                        .width(Length::Fill),
-                    button(text("✕").color(Color::WHITE))
-                        .padding(5)
-                        .on_press(Message::CloseWindow)
-                        .style(button::secondary)
-                ]
-                .align_y(Alignment::Center),
-                
-                text_input("Search units...", &state.search_query)
-                    .on_input(Message::SearchChanged)
-                    .padding(10)
-                    .size(16),
-
-                scrollable(
-                    column(
-                        result.outputs.iter()
-                            .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
-                            .map(|output| {
-                                let is_favorite = state.config.favorites.contains(&output.unit);
-                                let favorite_label = if is_favorite { "★" } else { "☆" };
-
-                                container(
-                                    row![
-                                        column![
-                                            text(format!("{:.4}", output.value))
-                                                .size(18)
-                                                .color(Color::WHITE),
-                                            text(&output.unit)
-                                                .size(14)
-                                                .color(Color::from_rgb8(150, 150, 150))
-                                        ]
-                                        .width(Length::Fill),
-                                        
-                                        row![
-                                            button(text("⇄"))
-                                                .on_press(Message::Swap(output.value, output.unit.clone()))
-                                                .padding(5),
-                                            button(text(favorite_label))
-                                                .on_press(Message::ToggleFavorite(output.unit.clone()))
-                                                .padding(5)
-                                        ]
-                                        .spacing(5)
-                                    ]
-                                    .align_y(Alignment::Center)
-                                )
-                                .padding(10)
-                                .style(|_theme: &Theme| {
-                                    container::Style {
-                                        border: iced::Border {
-                                            color: Color::from_rgba8(255, 255, 255, 0.1),
-                                            width: 1.0,
-                                            radius: 4.0.into(),
-                                        },
-                                        ..Default::default()
-                                    }
-                                })
-                                .into()
-                            })
-                    )
-                    .spacing(10)
-                )
+    let content = if let Some(result) = &state.current_result {
+        let search_query_lower = state.search_query.to_lowercase();
+        
+        column![
+            row![
+                text(format!("{:.2} {}", result.input_value, result.input_unit))
+                    .size(24)
+                    .color(Color::WHITE)
+                    .width(Length::Fill),
+                button(text("✕").color(Color::WHITE))
+                    .padding(5)
+                    .on_press(Message::CloseWindow)
+                    .style(button::secondary)
             ]
-            .spacing(15)
-            .align_x(Alignment::Start)
-        }
-    );
+            .align_y(Alignment::Center),
+            
+            text_input("Search units...", &state.search_query)
+                .on_input(Message::SearchChanged)
+                .padding(10)
+                .size(16),
+
+            scrollable(
+                column(
+                    result.outputs.iter()
+                        .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
+                        .map(|output| {
+                            let is_favorite = state.config.favorites.contains(&output.unit);
+                            let favorite_label = if is_favorite { "★" } else { "☆" };
+
+                            container(
+                                row![
+                                    column![
+                                        text(format!("{:.4}", output.value))
+                                            .size(18)
+                                            .color(Color::WHITE),
+                                        text(&output.unit)
+                                            .size(14)
+                                            .color(Color::from_rgb8(150, 150, 150))
+                                    ]
+                                    .width(Length::Fill),
+                                    
+                                    row![
+                                        button(text("⇄"))
+                                            .on_press(Message::Swap(output.value, output.unit.clone()))
+                                            .padding(5),
+                                        button(text(favorite_label))
+                                            .on_press(Message::ToggleFavorite(output.unit.clone()))
+                                            .padding(5)
+                                    ]
+                                    .spacing(5)
+                                ]
+                                .align_y(Alignment::Center)
+                            )
+                            .padding(10)
+                            .style(|_theme: &Theme| {
+                                container::Style {
+                                    border: iced::Border {
+                                        color: Color::from_rgba8(255, 255, 255, 0.1),
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    ..Default::default()
+                                }
+                            })
+                            .into()
+                        })
+                )
+                .spacing(10)
+            )
+        ]
+        .spacing(15)
+        .align_x(Alignment::Start)
+    } else {
+        let search_query_lower = state.search_query.to_lowercase();
+        let all_units = state.converter.get_all_units();
+        
+        column![
+            row![
+                text(format!("Convert {:.4} ...", state.captured_value))
+                    .size(24)
+                    .color(Color::WHITE)
+                    .width(Length::Fill),
+                button(text("✕").color(Color::WHITE))
+                    .padding(5)
+                    .on_press(Message::CloseWindow)
+                    .style(button::secondary)
+            ]
+            .align_y(Alignment::Center),
+
+            text_input("Search source unit...", &state.search_query)
+                .on_input(Message::SearchChanged)
+                .padding(10)
+                .size(16),
+
+            scrollable(
+                column(
+                    all_units.into_iter()
+                        .filter(|u| u.to_lowercase().contains(&search_query_lower))
+                        .map(|unit| {
+                            button(text(unit.clone()).color(Color::WHITE))
+                                .on_press(Message::SelectSourceUnit(unit))
+                                .width(Length::Fill)
+                                .padding(10)
+                                .style(button::secondary)
+                                .into()
+                        })
+                )
+                .spacing(5)
+            )
+        ]
+        .spacing(15)
+        .align_x(Alignment::Start)
+    };
 
     container(content)
         .width(Length::Fill)
