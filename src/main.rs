@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-#[allow(clippy::unnecessary_wraps)]
-fn main() -> Result<()> {
-    println!("Hello, clippy-converter!");
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("Clippy Converter starting...");
     Ok(())
 }
