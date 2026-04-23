@@ -3,6 +3,7 @@ use std::time::Duration;
 
 pub mod api;
 pub mod clipboard;
+pub mod converter;
 pub mod models;
 pub mod parser;
 
