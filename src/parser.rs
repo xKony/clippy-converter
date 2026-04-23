@@ -104,6 +104,7 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[test]

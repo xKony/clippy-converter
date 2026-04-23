@@ -62,6 +62,7 @@ pub async fn refresh_cache_if_needed() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[test]

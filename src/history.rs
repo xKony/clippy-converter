@@ -96,6 +96,7 @@ pub fn get_history_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[tokio::test]
