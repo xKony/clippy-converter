@@ -17,10 +17,34 @@ pub struct Config {
     pub list_size: usize,
     /// Whether to log conversions to a file.
     pub history_enabled: bool,
+    /// How long to keep history logs.
+    pub history_retention: HistoryRetention,
     /// Interval for refreshing fiat currency rates in minutes.
     pub fiat_update_interval_mins: u64,
     /// Interval for refreshing cryptocurrency rates in minutes.
     pub crypto_update_interval_mins: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum HistoryRetention {
+    SevenDays,
+    ThirtyDays,
+    OneYear,
+    #[default]
+    Never,
+}
+
+impl HistoryRetention {
+    /// Returns the number of days for retention, or None if Never.
+    #[must_use]
+    pub fn to_days(self) -> Option<i64> {
+        match self {
+            Self::SevenDays => Some(7),
+            Self::ThirtyDays => Some(30),
+            Self::OneYear => Some(365),
+            Self::Never => None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -35,8 +59,9 @@ impl Default for Config {
             hotkey: "Shift+Alt+C".to_string(),
             list_size: 10,
             history_enabled: false,
+            history_retention: HistoryRetention::Never,
             fiat_update_interval_mins: 1440, // Daily
-            crypto_update_interval_mins: 1, // Every minute
+            crypto_update_interval_mins: 1,  // Every minute
         }
     }
 }
@@ -120,8 +145,10 @@ impl Cache {
         }
         let now = Utc::now();
         let duration = now.signed_duration_since(self.last_updated);
-        
-        let min_interval = config.fiat_update_interval_mins.min(config.crypto_update_interval_mins);
+
+        let min_interval = config
+            .fiat_update_interval_mins
+            .min(config.crypto_update_interval_mins);
         let min_interval_i64: i64 = min_interval.try_into().unwrap_or(i64::MAX);
         duration.num_minutes() >= min_interval_i64
     }
@@ -164,14 +191,14 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Helper to get the path to the configuration file.
 fn get_config_path() -> Result<PathBuf> {
-    let proj_dirs = ProjectDirs::from("com", "konyy", "clippy-converter")
+    let proj_dirs = ProjectDirs::from("com", "clippy", "clippy-converter")
         .context("Could not determine application config directory")?;
     Ok(proj_dirs.config_dir().join("config.json"))
 }
 
 /// Helper to get the path to the cache file.
 fn get_cache_path() -> Result<PathBuf> {
-    let proj_dirs = ProjectDirs::from("com", "konyy", "clippy-converter")
+    let proj_dirs = ProjectDirs::from("com", "clippy", "clippy-converter")
         .context("Could not determine application cache directory")?;
     Ok(proj_dirs.cache_dir().join("cache.json"))
 }
@@ -208,11 +235,17 @@ mod tests {
     fn test_cache_is_expired() {
         let mut cache = Cache::default();
         let config = Config::default();
-        assert!(cache.is_expired(&config), "Default/empty cache should be expired");
+        assert!(
+            cache.is_expired(&config),
+            "Default/empty cache should be expired"
+        );
 
         cache.rates.insert("USD".to_string(), 1.0);
         cache.last_updated = Utc::now();
-        assert!(!cache.is_expired(&config), "Fresh cache should not be expired");
+        assert!(
+            !cache.is_expired(&config),
+            "Fresh cache should not be expired"
+        );
 
         // Use a value large enough to exceed default intervals
         cache.last_updated = Utc::now() - chrono::Duration::hours(25);

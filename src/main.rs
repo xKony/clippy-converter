@@ -11,7 +11,7 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     println!("Clippy Converter starting...");
-    
+
     iced::daemon("Clippy Converter", ui::update, ui::view)
         .subscription(ui::subscription)
         .run_with(ui::boot)?;
