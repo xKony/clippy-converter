@@ -39,6 +39,7 @@ pub enum Message {
     HotkeyTriggered,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    WindowUnfocused(window::Id),
     SettingsWindowOpened(window::Id),
     SettingsWindowClosed(window::Id),
     CurrencyCacheRefreshed(Cache),
@@ -129,6 +130,22 @@ pub fn boot() -> (State, Task<Message>) {
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::HotkeyTriggered => handle_hotkey(state),
+        Message::WindowOpened(id) => {
+            state.window_id = Some(id);
+            Task::none()
+        }
+        Message::WindowClosed(id) => {
+            if state.window_id == Some(id) {
+                state.window_id = None;
+            }
+            Task::none()
+        }
+        Message::WindowUnfocused(id) => {
+            if state.window_id == Some(id) {
+                return window::close(id);
+            }
+            Task::none()
+        }
         Message::SettingsWindowOpened(id) => {
             state.settings_window_id = Some(id);
             Task::none()
@@ -273,7 +290,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ExitRequested => iced::exit(),
-        _ => Task::none(),
     }
 }
 
@@ -339,6 +355,10 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
                 decorations: false,
                 transparent: true,
                 level: window::Level::AlwaysOnTop,
+                platform_specific: iced::window::settings::PlatformSpecific {
+                    skip_taskbar: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             });
 
@@ -544,7 +564,15 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         })
     });
 
-    Subscription::batch(vec![hotkey_sub, tick_sub, keyboard_sub, tray_sub])
+    let blur_sub = iced::event::listen_with(|event, _status, id| {
+        if event == iced::Event::Window(iced::window::Event::Unfocused) {
+            Some(Message::WindowUnfocused(id))
+        } else {
+            None
+        }
+    });
+
+    Subscription::batch(vec![hotkey_sub, tick_sub, keyboard_sub, tray_sub, blur_sub])
 }
 
 fn format_hotkey(
