@@ -3,6 +3,7 @@ use std::time::Duration;
 
 pub mod api;
 pub mod models;
+pub mod parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
