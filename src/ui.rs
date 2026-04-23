@@ -1,7 +1,8 @@
 use crate::clipboard::ClipboardManager;
 use crate::converter::Converter;
+use crate::db::Db;
 use crate::hotkey;
-use crate::models::{Cache, Config, ConversionResult, HistoryRetention};
+use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use iced::widget::{
@@ -17,7 +18,7 @@ use tray_icon::{
 
 pub struct State {
     pub config: Config,
-    pub cache: Cache,
+    pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
     pub enigo: Enigo,
@@ -41,8 +42,6 @@ pub enum Message {
     WindowClosed(window::Id),
     WindowUnfocused(window::Id),
     SettingsWindowOpened(window::Id),
-    CurrencyCacheRefreshed(Cache),
-    Tick,
     SearchChanged(String),
     SelectSourceUnit(String),
     ToggleFavorite(String),
@@ -62,25 +61,36 @@ pub enum Message {
     ExitRequested,
 }
 
+/// Parameters for booting the UI.
+pub struct BootParams {
+    pub config: Config,
+    pub db: Db,
+}
+
+/// The title of the application.
+#[must_use]
+pub fn title() -> String {
+    String::from("Clippy Converter")
+}
+
 /// Initializes the application state.
 ///
 /// # Panics
-/// Panics if the clipboard, mouse controller, hotkey manager, or tray icon fails to initialize.
+/// Panics if the clipboard, mouse controller, hotkey manager, or tray icon fails to initialize.   
 #[expect(
     clippy::expect_used,
     reason = "Critical infrastructure failure at startup is non-recoverable"
 )]
-pub fn boot() -> (State, Task<Message>) {
-    let config = Config::load().unwrap_or_default();
-    let cache = Cache::load().unwrap_or_default();
-    let converter = Converter::new(config.clone(), cache.clone());
+pub fn boot(params: BootParams) -> (State, Task<Message>) {
+    let BootParams { config, db } = params;
+    let converter = Converter::new(config.clone(), db.clone());
 
     // Infrastructure
     let clipboard = ClipboardManager::new().expect("Failed to initialize clipboard");
-    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");
+    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");        
 
     // Hotkeys
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager");
+    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager"); 
     let hk = hotkey::parse_hotkey(&config.hotkey).expect("Failed to parse hotkey");
     hotkey_manager
         .register(hk)
@@ -102,7 +112,7 @@ pub fn boot() -> (State, Task<Message>) {
     (
         State {
             config,
-            cache,
+            db,
             converter,
             clipboard,
             enigo,
@@ -152,12 +162,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.settings_window_id = Some(id);
             Task::none()
         }
-        Message::CurrencyCacheRefreshed(new_cache) => {
-            state.cache = new_cache;
-            state.converter = Converter::new(state.config.clone(), state.cache.clone());
-            Task::none()
-        }
-        Message::Tick => handle_tick(state),
         Message::SearchChanged(query) => {
             state.search_query = query;
             Task::none()
@@ -178,7 +182,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.config.favorites.push(unit);
             }
             let _ = state.config.save();
-            state.converter = Converter::new(state.config.clone(), state.cache.clone());
+            state.converter = Converter::new(state.config.clone(), state.db.clone());
             Task::none()
         }
         Message::Swap(value, unit) => {
@@ -347,7 +351,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             )]
             let (_, open_task) = window::open(window::Settings {
                 size: (350.0, 400.0).into(),
-                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
+                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),        
                 decorations: false,
                 transparent: true,
                 level: window::Level::AlwaysOnTop,
@@ -360,21 +364,6 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
 
             return open_task.map(Message::WindowOpened);
         }
-    }
-    Task::none()
-}
-
-fn handle_tick(state: &State) -> Task<Message> {
-    if state.cache.is_expired(&state.config) {
-        return Task::perform(crate::api::fetch_latest_rates(), |res| {
-            res.map_or(Message::Tick, |rates| {
-                let mut cache = Cache::load().unwrap_or_default();
-                cache.rates = rates;
-                cache.last_updated = chrono::Utc::now();
-                let _ = cache.save();
-                Message::CurrencyCacheRefreshed(cache)
-            })
-        });
     }
     Task::none()
 }
@@ -401,7 +390,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                     .size(24)
                     .color(Color::WHITE)
                     .width(Length::Fill),
-                button(text("✕").color(Color::WHITE))
+                button(text("×").color(Color::WHITE))
                     .padding(5)
                     .on_press(Message::CloseWindow)
                     .style(button::secondary)
@@ -418,7 +407,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                         .iter()
                         .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
                         .map(|output| {
-                            let is_favorite = state.config.favorites.contains(&output.unit);
+                            let is_favorite = state.config.favorites.contains(&output.unit);       
                             let favorite_label = if is_favorite { "★" } else { "☆" };
 
                             container(
@@ -433,7 +422,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                                     ]
                                     .width(Length::Fill),
                                     row![
-                                        button(text("⇄"))
+                                        button(text("⇌"))
                                             .on_press(Message::Swap(
                                                 output.value,
                                                 output.unit.clone()
@@ -473,7 +462,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                     .size(24)
                     .color(Color::WHITE)
                     .width(Length::Fill),
-                button(text("✕").color(Color::WHITE))
+                button(text("×").color(Color::WHITE))
                     .padding(5)
                     .on_press(Message::CloseWindow)
                     .style(button::secondary)
@@ -522,7 +511,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 
 pub fn subscription(_state: &State) -> Subscription<Message> {
     let hotkey_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output| async move {
+        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
                 if let Ok(_event) = receiver.try_recv() {
@@ -534,13 +523,16 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         })
     });
 
-    let tick_sub = iced::time::every(Duration::from_secs(60)).map(|_| Message::Tick);
-
     let keyboard_sub =
-        iced::keyboard::on_key_press(|key, modifiers| Some(Message::KeyPressed(key, modifiers)));
+        iced::keyboard::listen().filter_map(|event| {
+            if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
+                return Some(Message::KeyPressed(key, modifiers));
+            }
+            None
+        });  
 
     let tray_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output| async move {
+        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             let receiver = MenuEvent::receiver();
             loop {
                 if let Ok(event) = receiver.try_recv() {
@@ -561,12 +553,12 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
     });
 
     let blur_sub = iced::event::listen_with(|event, _status, id| match event {
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
-        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
+        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)), 
+        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),       
         _ => None,
     });
 
-    Subscription::batch(vec![hotkey_sub, tick_sub, keyboard_sub, tray_sub, blur_sub])
+    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, blur_sub])
 }
 
 fn format_hotkey(
@@ -620,7 +612,7 @@ fn format_hotkey(
     // Note: Iced's Named variant for modifiers are different,
     // but Character might catch some if something weird happens.
     // More importantly, we don't want to return just "Ctrl" as a hotkey usually,
-    // though global-hotkey might allow it. But our parser expects at least one non-modifier.
+    // though global-hotkey might allow it. But our parser expects at least one non-modifier.      
     if matches!(
         key_str.as_str(),
         "Ctrl" | "Alt" | "Shift" | "Meta" | "Control" | "Command" | "Win"
@@ -673,7 +665,8 @@ fn view_settings(state: &State) -> Element<'_, Message> {
         ]
         .spacing(5),
         column![
-            checkbox("Enable History Logging", state.config.history_enabled)
+            checkbox(state.config.history_enabled)
+                .label("Enable History Logging")
                 .on_toggle(Message::ToggleHistory)
                 .size(20),
             if state.config.history_enabled {
@@ -711,7 +704,7 @@ fn view_settings(state: &State) -> Element<'_, Message> {
             row![
                 column![
                     text("Fiat").size(12).color(Color::from_rgb8(150, 150, 150)),
-                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())
+                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())        
                         .on_input(Message::FiatIntervalChanged)
                         .padding(10),
                 ]

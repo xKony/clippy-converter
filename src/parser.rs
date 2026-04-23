@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(res.unit, Some("EUR".to_string()));
 
         let res = parse_input("$ 100 000").unwrap();
-        assert_eq!(res.value, 100000.0);
+        assert_eq!(res.value, 100_000.0);
         assert_eq!(res.unit, Some("USD".to_string()));
     }
 
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn test_parse_number_with_spaces() {
         let res = parse_input("100 000 USD").unwrap();
-        assert_eq!(res.value, 100000.0);
+        assert_eq!(res.value, 100_000.0);
         assert_eq!(res.unit, Some("USD".to_string()));
     }
 

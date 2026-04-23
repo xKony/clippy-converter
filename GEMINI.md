@@ -28,6 +28,11 @@ As a standard Rust project, use the following commands:
 
 ## Development Conventions
 
+### Documentation & Dependencies
+- **MANDATORY Documentation Audit:** Before implementing any feature, agents MUST read the documentation of relevant dependencies (e.g., via Context7 or web search). 
+- **Stale Data Prevention:** Since LLMs are trained on older data, never rely on internal training knowledge for API signatures or behaviors.
+- **Local Docs Fallback:** If online documentation is unavailable or ambiguous, generate local documentation using `cargo doc --open` (or by reading the generated HTML in `target/doc`) to verify the exact version's API before writing code.
+
 ### Error Handling
 - Use `anyhow::Result` for application-level error handling.
 
