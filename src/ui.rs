@@ -41,7 +41,6 @@ pub enum Message {
     WindowClosed(window::Id),
     WindowUnfocused(window::Id),
     SettingsWindowOpened(window::Id),
-    SettingsWindowClosed(window::Id),
     CurrencyCacheRefreshed(Cache),
     Tick,
     SearchChanged(String),
@@ -138,6 +137,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if state.window_id == Some(id) {
                 state.window_id = None;
             }
+            if state.settings_window_id == Some(id) {
+                state.settings_window_id = None;
+            }
             Task::none()
         }
         Message::WindowUnfocused(id) => {
@@ -148,12 +150,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::SettingsWindowOpened(id) => {
             state.settings_window_id = Some(id);
-            Task::none()
-        }
-        Message::SettingsWindowClosed(id) => {
-            if state.settings_window_id == Some(id) {
-                state.settings_window_id = None;
-            }
             Task::none()
         }
         Message::CurrencyCacheRefreshed(new_cache) => {
@@ -564,12 +560,10 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         })
     });
 
-    let blur_sub = iced::event::listen_with(|event, _status, id| {
-        if event == iced::Event::Window(iced::window::Event::Unfocused) {
-            Some(Message::WindowUnfocused(id))
-        } else {
-            None
-        }
+    let blur_sub = iced::event::listen_with(|event, _status, id| match event {
+        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
+        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
+        _ => None,
     });
 
     Subscription::batch(vec![hotkey_sub, tick_sub, keyboard_sub, tray_sub, blur_sub])
