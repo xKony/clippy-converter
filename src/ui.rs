@@ -4,7 +4,7 @@ use crate::db::Db;
 use crate::hotkey;
 use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
     button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
 };
@@ -29,6 +29,7 @@ pub struct State {
     pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
     pub settings_window_id: Option<window::Id>,
+    pub is_opening_window: bool,
     pub search_query: String,
     pub tray_icon: TrayIcon,
     pub is_recording_hotkey: bool,
@@ -124,6 +125,7 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
             captured_unit: None,
             window_id: None,
             settings_window_id: None,
+            is_opening_window: false,
             search_query: String::new(),
             tray_icon,
             is_recording_hotkey: false,
@@ -149,6 +151,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::HotkeyTriggered => handle_hotkey(state),
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
+            state.is_opening_window = false;
             Task::none()
         }
         Message::WindowClosed(id) => {
@@ -328,6 +331,11 @@ fn log_conversion_if_enabled(state: &State) {
 }
 
 fn handle_hotkey(state: &mut State) -> Task<Message> {
+    if state.is_opening_window {
+        return Task::none();
+    }
+    state.is_opening_window = true;
+
     println!("Hotkey triggered!");
     if let Ok(text) = state.clipboard.capture_selection() {
         println!("Captured text: '{text}'");
@@ -379,6 +387,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             return window::open(settings).1.map(Message::WindowOpened);
         }
     }
+    state.is_opening_window = false;
     Task::none()
 }
 
@@ -550,7 +559,9 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
-                if let Ok(_event) = receiver.try_recv() {
+                if let Ok(event) = receiver.try_recv()
+                    && event.state == HotKeyState::Pressed
+                {
                     use iced::futures::SinkExt;
                     let _ = output.send(Message::HotkeyTriggered).await;
                 }
