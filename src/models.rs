@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +13,36 @@ pub struct Config {
     pub hotkey: String,
     /// Maximum number of conversion results to show.
     pub list_size: usize,
+    /// Whether to log conversions to a file.
+    pub history_enabled: bool,
+    /// How long to keep history logs.
+    pub history_retention: HistoryRetention,
+    /// Interval for refreshing fiat currency rates in minutes.
+    pub fiat_update_interval_mins: u64,
+    /// Interval for refreshing cryptocurrency rates in minutes.
+    pub crypto_update_interval_mins: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum HistoryRetention {
+    SevenDays,
+    ThirtyDays,
+    OneYear,
+    #[default]
+    Never,
+}
+
+impl HistoryRetention {
+    /// Returns the number of days for retention, or None if Never.
+    #[must_use]
+    pub const fn to_days(self) -> Option<i64> {
+        match self {
+            Self::SevenDays => Some(7),
+            Self::ThirtyDays => Some(30),
+            Self::OneYear => Some(365),
+            Self::Never => None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -28,6 +56,10 @@ impl Default for Config {
             ],
             hotkey: "Shift+Alt+C".to_string(),
             list_size: 10,
+            history_enabled: false,
+            history_retention: HistoryRetention::Never,
+            fiat_update_interval_mins: 1440, // Daily
+            crypto_update_interval_mins: 60, // Every hour
         }
     }
 }
@@ -59,64 +91,6 @@ impl Config {
     }
 }
 
-/// Cached currency rates and metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Cache {
-    /// Mapping of currency codes to their rates (relative to a base).
-    pub rates: HashMap<String, f64>,
-    /// Timestamp of the last successful update.
-    pub last_updated: DateTime<Utc>,
-}
-
-/// Interval after which the cache is considered expired (8 hours).
-const REFRESH_INTERVAL_HOURS: i64 = 8;
-
-impl Default for Cache {
-    fn default() -> Self {
-        Self {
-            rates: HashMap::new(),
-            last_updated: DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now),
-        }
-    }
-}
-
-impl Cache {
-    /// Loads the cache from the user's cache directory.
-    ///
-    /// # Errors
-    /// Returns an error if the cache directory cannot be determined or if the file exists but is invalid.
-    pub fn load() -> Result<Self> {
-        let path = get_cache_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read cache file at {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse cache file at {}", path.display()))
-    }
-
-    /// Saves the cache to the user's cache directory.
-    ///
-    /// # Errors
-    /// Returns an error if the cache directory cannot be created or if the file cannot be written.  
-    pub fn save(&self) -> Result<()> {
-        let path = get_cache_path()?;
-        save_json(&path, self)
-    }
-
-    /// Returns true if the cache is older than the refresh interval or empty.
-    #[must_use]
-    pub fn is_expired(&self) -> bool {
-        if self.rates.is_empty() {
-            return true;
-        }
-        let now = Utc::now();
-        let duration = now.signed_duration_since(self.last_updated);
-        duration.num_hours() >= REFRESH_INTERVAL_HOURS
-    }
-}
 /// Represents a single conversion result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvertedValue {
@@ -155,20 +129,14 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Helper to get the path to the configuration file.
 fn get_config_path() -> Result<PathBuf> {
-    let proj_dirs = ProjectDirs::from("com", "konyy", "clippy-converter")
+    let proj_dirs = ProjectDirs::from("com", "clippy", "clippy-converter")
         .context("Could not determine application config directory")?;
     Ok(proj_dirs.config_dir().join("config.json"))
 }
 
-/// Helper to get the path to the cache file.
-fn get_cache_path() -> Result<PathBuf> {
-    let proj_dirs = ProjectDirs::from("com", "konyy", "clippy-converter")
-        .context("Could not determine application cache directory")?;
-    Ok(proj_dirs.cache_dir().join("cache.json"))
-}
-
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[test]
@@ -184,27 +152,5 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let decoded: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, decoded);
-    }
-
-    #[test]
-    fn test_cache_serialization() {
-        let mut cache = Cache::default();
-        cache.rates.insert("PLN".to_string(), 4.5);
-        let json = serde_json::to_string(&cache).unwrap();
-        let decoded: Cache = serde_json::from_str(&json).unwrap();
-        assert_eq!(cache, decoded);
-    }
-
-    #[test]
-    fn test_cache_is_expired() {
-        let mut cache = Cache::default();
-        assert!(cache.is_expired(), "Default/empty cache should be expired");
-
-        cache.rates.insert("USD".to_string(), 1.0);
-        cache.last_updated = Utc::now();
-        assert!(!cache.is_expired(), "Fresh cache should not be expired");
-
-        cache.last_updated = Utc::now() - chrono::Duration::hours(REFRESH_INTERVAL_HOURS + 1);
-        assert!(cache.is_expired(), "Old cache should be expired");
     }
 }

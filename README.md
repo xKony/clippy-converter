@@ -1,1 +1,122 @@
-building...
+# Clippy Converter
+
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Rust](https://img.shields.io/badge/rust-2024-orange)
+
+A lightweight, ultra-fast background application designed for seamless unit and currency conversion. Highlight a value, press a global hotkey, and instantly see conversion results in a minimalist floating UI right at your cursor.
+
+## ✨ Features
+
+- **Global Hotkey Trigger**: Intercepts text selection via programmatic copy using a system-wide shortcut (Default: `Shift+Alt+C`).
+- **Floating UI Overlay**: Minimalist, borderless window that appears instantly at the mouse cursor.
+- **Smart Parsing**: Auto-detects numbers and units from captured text, including support for leading currency symbols (e.g., `$50`, `€ 120.50`).
+- **Extensible Conversions**:
+    - **Currencies**: 200+ fiat currencies and cryptocurrencies with rates updated in the background.
+    - **Physical Units**: Length (m, ft, in, etc.), Weight (kg, lb, oz, etc.), and Temperature (C, F, K).
+- **Local Caching**: Uses a local database (`redb`) to store exchange rates, ensuring offline availability and blazing-fast response times.
+- **Background Workers**: Automated tasks to refresh fiat and crypto rates at configurable intervals.
+- **Favorites & Sorting**: Quick access to your most-used units; favorites are pinned to the top of the results.
+- **Conversion History**: Optional logging of conversions with configurable retention periods.
+- **Tray Integration**: Minimal footprint with a system tray icon for quick access to settings and application exit.
+- **Single Instance**: Built-in protection to ensure only one instance of the application runs at a time.
+
+[↑ Back to top](#)
+
+## 🛠 Tech Stack
+
+- **Language**: Rust (Edition 2024)
+- **GUI**: [Iced](https://iced.rs/) (v0.14.0) with tokio integration
+- **Database**: [redb](https://www.redb.org/) (v4.1.0) for high-performance local storage
+- **Hotkeys**: `global-hotkey` (v0.7.0)
+- **Clipboard**: `arboard` (v3.4)
+- **Networking**: `reqwest` (v0.13.2)
+- **Serialization**: `serde` & `serde_json` (v1.0)
+- **Automation**: `enigo` (v0.6.1) for selection capture
+- **Runtime**: `tokio` (v1)
+
+[↑ Back to top](#)
+
+## 🌐 Data Sources & APIs
+
+Clippy Converter relies on high-quality, real-time and daily-updated data sources to provide accurate conversions:
+
+- **Fiat Currency Rates**: Powered by the [Currency API by Fawaz Ahmed](https://github.com/fawazahmed0/currency-api). 
+    - Supports 200+ currencies.
+    - Provides daily updated exchange rates via a blazing-fast CDN.
+    - Credited via `currency-exchange-rates-api.md`.
+- **Cryptocurrency Prices**: Real-time ticker data is fetched from the [Binance API](https://binance-docs.github.io/apidocs/spot/en/#symbol-price-ticker).
+    - Ensures high-accuracy prices for major crypto pairs (e.g., BTC, ETH, SOL).
+    - Updated at configurable intervals (default: 1 minute).
+
+[↑ Back to top](#)
+
+## 📁 Project Structure
+
+```text
+clippy-converter/
+├── src/
+│   ├── main.rs          # Entry point, initialization, and single instance lock
+│   ├── ui.rs            # Iced GUI implementation, window management, and messaging
+│   ├── converter.rs     # Core conversion engine for physical units and currencies
+│   ├── parser.rs        # Input string parsing logic for numbers and symbols
+│   ├── db.rs            # Persistence layer using redb for exchange rates
+│   ├── api.rs           # External API integration for currency rates
+│   ├── models.rs        # Shared data structures and configuration logic
+│   ├── clipboard.rs     # Clipboard capture and restoration manager
+│   ├── hotkey.rs        # Hotkey parsing and registration utilities
+│   ├── workers.rs       # Background update tasks for fiat/crypto rates
+│   └── history.rs       # Conversion logging and retention management
+├── Cargo.toml           # Project dependencies and strict lint configuration
+└── project-whitepaper.md # Detailed project vision and architecture
+```
+
+[↑ Back to top](#)
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- **Rust**: Latest stable version (Edition 2024 support required).
+- **OS**: Windows (tested), Linux/macOS support depends on `iced` and `global-hotkey` compatibility.
+
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/xKony/clippy-converter.git
+   cd clippy-converter
+   ```
+
+2. Build and run in release mode:
+   ```bash
+   cargo run --release
+   ```
+
+### Configuration
+
+The application stores its configuration in the standard user config directory (e.g., `%AppData%\clippy\clippy-converter\config.json` on Windows).
+
+- **Hotkey**: Change the trigger shortcut in Settings (Default: `Shift+Alt+C`).
+- **Update Intervals**: Configure how often fiat and crypto rates should refresh.
+- **Favorites**: Toggle the "star" icon next to any unit to pin it.
+
+[↑ Back to top](#)
+
+## 📖 Usage
+
+1. Start the application. It will minimize to the system tray.
+2. Highlight any text containing a value (e.g., `100 USD`, `5.5 kg`, or just `20`).
+3. Press `Shift+Alt+C`.
+4. A window will appear at your cursor with conversion results.
+5. Use the **Search bar** to find specific target units.
+6. Click the **Swap (⇌)** button to reverse the conversion.
+7. Click the **Favorite (★)** button to save a unit for quick access.
+
+[↑ Back to top](#)
+
+## 📄 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+[↑ Back to top](#)

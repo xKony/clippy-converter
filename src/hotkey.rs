@@ -113,6 +113,7 @@ fn parse_code(s: &str) -> Result<Code> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[test]

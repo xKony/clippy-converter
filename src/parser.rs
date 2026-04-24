@@ -48,10 +48,11 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
     // Check for leading currency symbol
     for (sym, unit) in symbols {
         if input.starts_with(sym) {
-            let value_str = &input[sym.len_utf8()..].trim();
+            let value_raw = input[sym.len_utf8()..].trim();
+            let value_str = value_raw.replace(|c: char| c.is_whitespace(), "");
             let value: f64 = value_str
                 .parse()
-                .map_err(|_| anyhow!("Invalid number format after symbol: {value_str}"))?;
+                .map_err(|_| anyhow!("Invalid number format after symbol: {value_raw}"))?;
             return Ok(ParsedInput {
                 value,
                 unit: Some(unit.to_string()),
@@ -71,10 +72,27 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         } else if c == '.' && !found_decimal {
             found_decimal = true;
             number_end = i + 1;
-        } else if c.is_whitespace() || c.is_alphabetic() || c == '%' {
+        } else if c.is_whitespace() {
+            // Peek ahead to see if more digits or a decimal follow
+            let remaining = &input[i + 1..];
+            let mut is_part_of_number = false;
+            for nc in remaining.chars() {
+                if nc.is_ascii_digit() || (nc == '.' && !found_decimal) {
+                    is_part_of_number = true;
+                    break;
+                } else if !nc.is_whitespace() {
+                    break;
+                }
+            }
+
+            if is_part_of_number {
+                continue;
+            }
+            break;
+        } else if c.is_alphabetic() || c == '%' {
             // Reached potential unit start
             break;
-        } else if c == '-' && !found_digit {
+        } else if c == '-' && !found_digit && !found_decimal {
             // Negative sign at start
             number_end = i + 1;
         } else {
@@ -87,10 +105,11 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         return Err(anyhow!("No numeric value found in: {input}"));
     }
 
-    let value_str = &input[..number_end];
+    let value_raw = &input[..number_end];
+    let value_str = value_raw.replace(|c: char| c.is_whitespace(), "");
     let value: f64 = value_str
         .parse()
-        .map_err(|_| anyhow!("Failed to parse numeric part: {value_str}"))?;
+        .map_err(|_| anyhow!("Failed to parse numeric part: {value_raw}"))?;
 
     let unit_str = input[number_end..].trim();
     let unit = if unit_str.is_empty() {
@@ -104,6 +123,7 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
     #[test]
@@ -122,6 +142,10 @@ mod tests {
         let res = parse_input("€ 120.50").unwrap();
         assert_eq!(res.value, 120.50);
         assert_eq!(res.unit, Some("EUR".to_string()));
+
+        let res = parse_input("$ 100 000").unwrap();
+        assert_eq!(res.value, 100_000.0);
+        assert_eq!(res.unit, Some("USD".to_string()));
     }
 
     #[test]
@@ -140,6 +164,13 @@ mod tests {
         let res = parse_input("-15.2").unwrap();
         assert_eq!(res.value, -15.2);
         assert_eq!(res.unit, None);
+    }
+
+    #[test]
+    fn test_parse_number_with_spaces() {
+        let res = parse_input("100 000 USD").unwrap();
+        assert_eq!(res.value, 100_000.0);
+        assert_eq!(res.unit, Some("USD".to_string()));
     }
 
     #[test]

@@ -1,4 +1,5 @@
-use crate::models::{Cache, Config, ConversionResult, ConvertedValue};
+use crate::db::Db;
+use crate::models::{Config, ConversionResult, ConvertedValue};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 
@@ -30,16 +31,16 @@ struct UnitDefinition {
 pub struct Converter {
     /// User configuration for sorting and limits.
     config: Config,
-    /// Cached currency rates.
-    cache: Cache,
+    /// Database handle for currency rates.
+    db: Db,
     /// Registry of all supported physical units.
     units: HashMap<String, UnitDefinition>,
 }
 
 impl Converter {
-    /// Creates a new `Converter` with the provided configuration and cache.
+    /// Creates a new `Converter` with the provided configuration and database handle.
     #[must_use]
-    pub fn new(config: Config, cache: Cache) -> Self {
+    pub fn new(config: Config, db: Db) -> Self {
         let mut units = HashMap::new();
 
         // Length Units (Base: meter)
@@ -78,22 +79,20 @@ impl Converter {
         add_unit(&mut units, "ounces", UnitCategory::Weight, 28.349_523_125);
 
         // Temperature Units (Base: Celsius)
-        // Special case handling will be used for calculation.
         add_unit(&mut units, "C", UnitCategory::Temperature, 1.0);
         add_unit(&mut units, "F", UnitCategory::Temperature, 1.0);
         add_unit(&mut units, "K", UnitCategory::Temperature, 1.0);
 
-        Self {
-            config,
-            cache,
-            units,
-        }
+        Self { config, db, units }
     }
 
     /// Returns a deduplicated list of all supported unit and currency symbols.
+    #[must_use]
     pub fn get_all_units(&self) -> Vec<String> {
         let mut units: Vec<String> = self.units.keys().cloned().collect();
-        units.extend(self.cache.rates.keys().cloned());
+        if let Ok(db_symbols) = self.db.get_all_symbols() {
+            units.extend(db_symbols);
+        }
         units.sort();
         units.dedup();
         units
@@ -109,10 +108,13 @@ impl Converter {
 
         match category {
             UnitCategory::Currency => {
-                for (symbol, rate) in &self.cache.rates {
-                    if symbol != from_unit {
+                let symbols = self.db.get_all_symbols()?;
+                for symbol in symbols {
+                    if symbol != from_unit
+                        && let Some(entry) = self.db.get_rate(&symbol)?
+                    {
                         outputs.push(ConvertedValue {
-                            value: base_value * rate,
+                            value: base_value * entry.price,
                             unit: symbol.clone(),
                         });
                     }
@@ -141,7 +143,7 @@ impl Converter {
             }
         }
 
-        // Deduplicate units (e.g., "m" and "meter" point to same symbol)
+        // Deduplicate units
         outputs.sort_by(|a, b| a.unit.cmp(&b.unit));
         outputs.dedup_by(|a, b| a.unit == b.unit);
 
@@ -179,9 +181,10 @@ impl Converter {
             return Ok((unit_def.category, value * unit_def.factor));
         }
 
-        if self.cache.rates.contains_key(unit) {
-            let eur_rate = self.cache.rates.get(unit).unwrap_or(&1.0);
-            return Ok((UnitCategory::Currency, value / eur_rate));
+        if let Some(entry) = self.db.get_rate(unit)? {
+            // entry.price is units per 1 EUR.
+            // value in EUR = value / units_per_eur
+            return Ok((UnitCategory::Currency, value / entry.price));
         }
 
         Err(anyhow!("Unsupported unit: {unit}"))
@@ -222,13 +225,24 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
+    use crate::db::RateSource;
+    use redb::Database;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    fn create_test_db() -> Db {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        Db::open_for_test(Arc::new(db_inner))
+    }
 
     #[test]
     fn test_length_conversion() {
         let config = Config::default();
-        let cache = Cache::default();
-        let converter = Converter::new(config, cache);
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
 
         let res = converter.convert(1.0, "m").unwrap();
         let cm = res.outputs.iter().find(|o| o.unit == "cm").unwrap();
@@ -238,10 +252,10 @@ mod tests {
     #[test]
     fn test_currency_conversion() {
         let config = Config::default();
-        let mut cache = Cache::default();
-        cache.rates.insert("USD".to_string(), 1.1);
-        cache.rates.insert("EUR".to_string(), 1.0);
-        let converter = Converter::new(config, cache);
+        let db = create_test_db();
+        db.update_rate("USD", 1.1, 100, RateSource::Fiat).unwrap();
+        db.update_rate("EUR", 1.0, 100, RateSource::Fiat).unwrap();
+        let converter = Converter::new(config, db);
 
         let res = converter.convert(10.0, "EUR").unwrap();
         let usd = res.outputs.iter().find(|o| o.unit == "USD").unwrap();
@@ -251,8 +265,8 @@ mod tests {
     #[test]
     fn test_temperature_conversion() {
         let config = Config::default();
-        let cache = Cache::default();
-        let converter = Converter::new(config, cache);
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
 
         let res = converter.convert(0.0, "C").unwrap();
         let f = res.outputs.iter().find(|o| o.unit == "F").unwrap();
@@ -265,12 +279,12 @@ mod tests {
             favorites: vec!["ft".to_string()],
             ..Config::default()
         };
-        let cache = Cache::default();
-        let converter = Converter::new(config, cache);
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
 
         let res = converter.convert(1.0, "m").unwrap();
 
-        // Ensure "meter", "meters", "m" are not all present as outputs
+        // Ensure "m" is not present as outputs when it's the input
         let m_count = res.outputs.iter().filter(|o| o.unit == "m").count();
         assert_eq!(m_count, 0, "Input unit should not be in output");
 
@@ -284,8 +298,8 @@ mod tests {
             list_size: 2,
             ..Config::default()
         };
-        let cache = Cache::default();
-        let converter = Converter::new(config, cache);
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
 
         let res = converter.convert(1.0, "m").unwrap();
         assert_eq!(res.outputs.len(), 2);

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Manages clipboard operations and programmatic text copying.
 pub struct ClipboardManager {
@@ -33,7 +33,20 @@ impl ClipboardManager {
         // 1. Store original clipboard content
         let original_content = self.clipboard.get_text().ok();
 
-        // 2. Trigger Ctrl+C
+        // 2. Set a unique marker to the clipboard to detect when the copy completes
+        let marker = format!(
+            "clippy_converter_marker_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let _ = self.clipboard.set_text(marker.clone());
+
+        // Give the OS a tiny moment to register the new clipboard state
+        thread::sleep(Duration::from_millis(10));
+
+        // 3. Trigger Ctrl+C
         #[cfg(target_os = "macos")]
         let modifier = Key::Meta;
         #[cfg(not(target_os = "macos"))]
@@ -49,20 +62,25 @@ impl ClipboardManager {
             .key(modifier, Direction::Release)
             .context("Failed to release modifier key")?;
 
-        // 3. Wait a moment for the system to process the copy
-        thread::sleep(Duration::from_millis(100));
+        // 4. Poll clipboard until the content changes from the marker
+        let start_time = Instant::now();
+        let mut captured_text = String::new();
 
-        // 4. Read new content
-        let captured_text = self
-            .clipboard
-            .get_text()
-            .context("Failed to read text from clipboard after copy")?;
+        while start_time.elapsed() < Duration::from_millis(500) {
+            if let Ok(text) = self.clipboard.get_text()
+                && text != marker
+            {
+                captured_text = text;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
 
         // 5. Restore original content if it existed
         if let Some(original) = original_content {
-            self.clipboard
-                .set_text(original)
-                .context("Failed to restore original clipboard content")?;
+            let _ = self.clipboard.set_text(original);
+        } else {
+            let _ = self.clipboard.clear();
         }
 
         Ok(captured_text)
@@ -71,12 +89,12 @@ impl ClipboardManager {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
-    use once_cell::sync::Lazy;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     // Use a global mutex to prevent tests from clashing on the shared system clipboard
-    static CLIPBOARD_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static CLIPBOARD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     #[ignore = "This test interacts with the system clipboard and requires a selection to work correctly."]
