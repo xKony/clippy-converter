@@ -468,7 +468,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
         .spacing(15)
         .align_x(Alignment::Start)
     } else {
-        let all_units = state.converter.get_all_units();
+        let all_units = state.converter.get_all_units().unwrap_or_default();
 
         column![
             row![

@@ -162,6 +162,9 @@ impl Db {
             let mut table = write_txn
                 .open_table(RATES_TABLE)
                 .context("Failed to open rates table")?;
+            let mut units_table = write_txn
+                .open_table(UNITS_TABLE)
+                .context("Failed to open units table")?;
 
             let should_update = table
                 .get(symbol)
@@ -184,6 +187,26 @@ impl Db {
                         },
                     )
                     .context("Failed to insert rate into database")?;
+
+                // Also update the unified UNITS_TABLE
+                // For currencies, factor = price (base is EUR, so Base = Val * price)
+                // Wait, if price is EUR per 1 Unit, then Base_EUR = Val_Unit * price.
+                // If price is Units per 1 EUR, then Base_EUR = Val_Unit / price.
+                // The current implementation of workers/api uses "Price relative to EUR".
+                // In fetch_fiat_rates, it's 1.0/rate (EUR per 1 unit).
+                // So Base_EUR = Val_Unit * price.
+                units_table
+                    .insert(
+                        symbol,
+                        UnitEntry {
+                            factor: price,
+                            offset: 0.0,
+                            category: UnitCategory::Currency as u8,
+                            timestamp,
+                            source: source as u8,
+                        },
+                    )
+                    .context("Failed to insert into units table")?;
             }
         }
         write_txn
@@ -192,7 +215,7 @@ impl Db {
         Ok(())
     }
 
-    /// Retrieves a rate for a given symbol.
+    /// Retrieves a rate for a given symbol from the deprecated rates table.
     ///
     /// # Errors
     /// Returns an error if the read transaction fails.
@@ -218,8 +241,8 @@ impl Db {
             .begin_read()
             .context("Failed to begin read transaction")?;
         let table = read_txn
-            .open_table(RATES_TABLE)
-            .context("Failed to open rates table")?;
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
         let mut symbols = Vec::new();
         for result in table.iter().context("Failed to iterate table")? {
             let (key, _) = result.context("Failed to read row")?;
