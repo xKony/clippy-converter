@@ -37,6 +37,20 @@ A lightweight, ultra-fast background application designed for seamless unit and 
 
 [↑ Back to top](#)
 
+## 🌐 Data Sources & APIs
+
+Clippy Converter relies on high-quality, real-time and daily-updated data sources to provide accurate conversions:
+
+- **Fiat Currency Rates**: Powered by the [Currency API by Fawaz Ahmed](https://github.com/fawazahmed0/currency-api). 
+    - Supports 200+ currencies.
+    - Provides daily updated exchange rates via a blazing-fast CDN.
+    - Credited via `currency-exchange-rates-api.md`.
+- **Cryptocurrency Prices**: Real-time ticker data is fetched from the [Binance API](https://binance-docs.github.io/apidocs/spot/en/#symbol-price-ticker).
+    - Ensures high-accuracy prices for major crypto pairs (e.g., BTC, ETH, SOL).
+    - Updated at configurable intervals (default: 1 minute).
+
+[↑ Back to top](#)
+
 ## 📁 Project Structure
 
 ```text
