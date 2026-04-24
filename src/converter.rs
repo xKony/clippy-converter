@@ -168,6 +168,37 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_currency_conversion() {
+        let config = Config::default();
+        let db = create_test_db();
+        
+        // 1. EUR is base
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
+        
+        // 2. PLN (Fiat): 1 EUR = 4.0 PLN -> Factor = 1/4 = 0.25
+        db.update_rate("PLN", 4.0, 1000, RateSource::Fiat).unwrap();
+        
+        // 3. BTC (Crypto): 1 BTC = 50000 EUR -> Factor = 50000
+        db.update_rate("BTC", 50000.0, 1000, RateSource::Crypto).unwrap();
+        
+        let converter = Converter::new(config, db);
+
+        // Convert 1 BTC to PLN
+        // Base_EUR = 1 * 50000 = 50000
+        // Target_PLN = 50000 / 0.25 = 200000
+        let res = converter.convert(1.0, "BTC").unwrap();
+        let pln = res.outputs.iter().find(|o| o.unit == "PLN").unwrap();
+        assert!((pln.value - 200000.0).abs() < f64::EPSILON);
+
+        // Convert 4 PLN to BTC
+        // Base_EUR = 4 * 0.25 = 1.0
+        // Target_BTC = 1.0 / 50000 = 0.00002
+        let res = converter.convert(4.0, "PLN").unwrap();
+        let btc = res.outputs.iter().find(|o| o.unit == "BTC").unwrap();
+        assert!((btc.value - 0.00002).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_deduplication_and_sorting() {
         let config = Config {
             favorites: vec!["ft".to_string()],

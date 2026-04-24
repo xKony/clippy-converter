@@ -189,17 +189,20 @@ impl Db {
                     .context("Failed to insert rate into database")?;
 
                 // Also update the unified UNITS_TABLE
-                // For currencies, factor = price (base is EUR, so Base = Val * price)
-                // Wait, if price is EUR per 1 Unit, then Base_EUR = Val_Unit * price.
-                // If price is Units per 1 EUR, then Base_EUR = Val_Unit / price.
-                // The current implementation of workers/api uses "Price relative to EUR".
-                // In fetch_fiat_rates, it's 1.0/rate (EUR per 1 unit).
-                // So Base_EUR = Val_Unit * price.
+                // Factor must be "EUR per 1 Unit" so that Base_EUR = Value * Factor.
+                // - Fiat rates are "Units per 1 EUR" (e.g. 1.08 USD/EUR), so Factor = 1/price.
+                // - Crypto rates are already "EUR per 1 Unit" (e.g. 60000 EUR/BTC), so Factor = price.
+                let factor = if source == RateSource::Fiat {
+                    if price == 0.0 { 0.0 } else { 1.0 / price }
+                } else {
+                    price
+                };
+
                 units_table
                     .insert(
                         symbol,
                         UnitEntry {
-                            factor: price,
+                            factor,
                             offset: 0.0,
                             category: UnitCategory::Currency as u8,
                             timestamp,
