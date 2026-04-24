@@ -37,6 +37,10 @@ fn main() -> Result<()> {
             process::exit(1);
         }
     };
+
+    if let Err(e) = db.init_static_units() {
+        eprintln!("Failed to initialize static units: {e}");
+    }
     
     iced::daemon(move || ui::boot(ui::BootParams { config: config.clone(), db: db.clone() }), ui::update, ui::view)
         .subscription(ui::subscription)

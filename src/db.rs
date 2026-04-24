@@ -5,12 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::RateSource;
+use crate::models::{RateSource, UnitCategory, UnitEntry};
 
 /// Schema for the rates table: Symbol -> (Price, Timestamp, `SourceID`)
+/// DEPRECATED: Use `UNITS_TABLE` instead.
 const RATES_TABLE: TableDefinition<&str, RateEntry> = TableDefinition::new("rates");
 
+/// Schema for unified units and currency rates.
+const UNITS_TABLE: TableDefinition<&str, UnitEntry> = TableDefinition::new("units_v2");
+
+/// Schema for unit aliases (e.g., "meters" -> "m").
+const ALIASES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("aliases");
+
 /// A single rate entry stored in the database.
+/// DEPRECATED: Use `UnitEntry` instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RateEntry {
     /// The price relative to the internal base (EUR).
@@ -50,6 +58,37 @@ impl redb::Value for RateEntry {
     }
 }
 
+// Implement redb::Value for UnitEntry using bincode serialization.
+impl redb::Value for UnitEntry {
+    type SelfType<'a> = Self;
+    type AsBytes<'a> = Vec<u8>;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        bincode::deserialize(data).unwrap_or(Self {
+            factor: 1.0,
+            offset: 0.0,
+            category: 0,
+            timestamp: 0,
+            source: 0,
+        })
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> {
+        bincode::serialize(value).unwrap_or_default()
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("UnitEntry")
+    }
+}
+
 /// Thread-safe wrapper around the redb database.
 #[derive(Clone)]
 pub struct Db {
@@ -82,6 +121,12 @@ impl Db {
             let _ = write_txn
                 .open_table(RATES_TABLE)
                 .context("Failed to create rates table")?;
+            let _ = write_txn
+                .open_table(UNITS_TABLE)
+                .context("Failed to create units table")?;
+            let _ = write_txn
+                .open_table(ALIASES_TABLE)
+                .context("Failed to create aliases table")?;
         }
         write_txn.commit().context("Failed to commit init transaction")?;
 
@@ -182,6 +227,367 @@ impl Db {
         }
         Ok(symbols)
     }
+
+    /// Resolves a unit symbol or alias to its canonical form.
+    ///
+    /// # Errors
+    /// Returns an error if the database read fails.
+    pub fn resolve_symbol(&self, symbol: &str) -> Result<String> {
+        let read_txn = self
+            .inner
+            .begin_read()
+            .context("Failed to begin read transaction")?;
+        let alias_table = read_txn
+            .open_table(ALIASES_TABLE)
+            .context("Failed to open aliases table")?;
+
+        // 1. Check direct alias (e.g., "kilometers" -> "km")
+        if let Some(canonical) = alias_table.get(symbol).context("Failed to read alias")? {
+            return Ok(canonical.value().to_string());
+        }
+
+        // 2. Check lowercase alias (e.g., "Celsius" -> "celsius" -> "C")
+        let lower = symbol.to_lowercase();
+        if let Some(canonical) = alias_table
+            .get(lower.as_str())
+            .context("Failed to read lowercase alias")?
+        {
+            return Ok(canonical.value().to_string());
+        }
+
+        Ok(symbol.to_string())
+    }
+
+    /// Retrieves a unit entry for a given symbol.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction fails.
+    pub fn get_unit(&self, symbol: &str) -> Result<Option<UnitEntry>> {
+        let read_txn = self
+            .inner
+            .begin_read()
+            .context("Failed to begin read transaction")?;
+        let table = read_txn
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
+        let result = table.get(symbol).context("Failed to query symbol")?;
+        Ok(result.map(|r| r.value()))
+    }
+
+    /// Retrieves all units belonging to a specific category.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or iteration fails.
+    pub fn get_category_units(&self, category: u8) -> Result<Vec<(String, UnitEntry)>> {
+        let read_txn = self
+            .inner
+            .begin_read()
+            .context("Failed to begin read transaction")?;
+        let table = read_txn
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
+        let mut units = Vec::new();
+        for result in table.iter().context("Failed to iterate units")? {
+            let (key, value) = result.context("Failed to read unit row")?;
+            let entry = value.value();
+            if entry.category == category {
+                units.push((key.value().to_string(), entry));
+            }
+        }
+        Ok(units)
+    }
+
+    /// Updates a unit in the database.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction fails.
+    pub fn update_unit(
+        &self,
+        symbol: &str,
+        factor: f64,
+        offset: f64,
+        category: UnitCategory,
+        source: RateSource,
+    ) -> Result<()> {
+        let write_txn = self
+            .inner
+            .begin_write()
+            .context("Failed to begin write transaction")?;
+        {
+            let mut table = write_txn
+                .open_table(UNITS_TABLE)
+                .context("Failed to open units table")?;
+            table
+                .insert(
+                    symbol,
+                    UnitEntry {
+                        factor,
+                        offset,
+                        category: category as u8,
+                        timestamp: chrono::Utc::now().timestamp(),
+                        source: source as u8,
+                    },
+                )
+                .context("Failed to insert unit")?;
+        }
+        write_txn.commit().context("Failed to commit unit update")?;
+        Ok(())
+    }
+
+    /// Initializes the database with static units and their aliases.
+    ///
+    /// # Errors
+    /// Returns an error if any transaction fails.
+    pub fn init_static_units(&self) -> Result<()> {
+        let write_txn = self
+            .inner
+            .begin_write()
+            .context("Failed to begin write transaction")?;
+        {
+            let mut units = write_txn
+                .open_table(UNITS_TABLE)
+                .context("Failed to open units table")?;
+            let mut aliases = write_txn
+                .open_table(ALIASES_TABLE)
+                .context("Failed to open aliases table")?;
+
+            init_length_units(&mut units, &mut aliases)?;
+            init_weight_units(&mut units, &mut aliases)?;
+            init_temperature_units(&mut units, &mut aliases)?;
+            init_time_units(&mut units, &mut aliases)?;
+        }
+        write_txn.commit().context("Failed to commit static units")?;
+        Ok(())
+    }
+}
+
+/// Helper to add a unit and its variations to the database.
+fn add_unit_static(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+    sym: &str,
+    cat: UnitCategory,
+    factor: f64,
+    offset: f64,
+    variations: &[&str],
+) -> Result<()> {
+    units
+        .insert(
+            sym,
+            UnitEntry {
+                factor,
+                offset,
+                category: cat as u8,
+                timestamp: 0,
+                source: RateSource::Static as u8,
+            },
+        )
+        .context("Failed to insert static unit")?;
+    for v in variations {
+        aliases
+            .insert(*v, sym)
+            .context("Failed to insert alias")?;
+        aliases
+            .insert(v.to_lowercase().as_str(), sym)
+            .context("Failed to insert lowercase alias")?;
+    }
+    Ok(())
+}
+
+fn init_length_units(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+) -> Result<()> {
+    add_unit_static(
+        units,
+        aliases,
+        "m",
+        UnitCategory::Length,
+        1.0,
+        0.0,
+        &["meter", "meters", "metre", "metres"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "km",
+        UnitCategory::Length,
+        1000.0,
+        0.0,
+        &["kilometer", "kilometers", "kilometre", "kilometres"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "cm",
+        UnitCategory::Length,
+        0.01,
+        0.0,
+        &["centimeter", "centimeters", "centimetre", "centimetres"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "mm",
+        UnitCategory::Length,
+        0.001,
+        0.0,
+        &["millimeter", "millimeters", "millimetre", "millimetres"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "in",
+        UnitCategory::Length,
+        0.0254,
+        0.0,
+        &["inch", "inches"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "ft",
+        UnitCategory::Length,
+        0.3048,
+        0.0,
+        &["foot", "feet", "ft."],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "yd",
+        UnitCategory::Length,
+        0.9144,
+        0.0,
+        &["yard", "yards"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "mi",
+        UnitCategory::Length,
+        1609.344,
+        0.0,
+        &["mile", "miles"],
+    )?;
+    Ok(())
+}
+
+fn init_weight_units(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+) -> Result<()> {
+    add_unit_static(units, aliases, "g", UnitCategory::Weight, 1.0, 0.0, &[
+        "gram", "grams", "gr",
+    ])?;
+    add_unit_static(
+        units,
+        aliases,
+        "kg",
+        UnitCategory::Weight,
+        1000.0,
+        0.0,
+        &["kilogram", "kilograms", "kilo"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "mg",
+        UnitCategory::Weight,
+        0.001,
+        0.0,
+        &["milligram", "milligrams"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "lb",
+        UnitCategory::Weight,
+        453.592_37,
+        0.0,
+        &["pound", "pounds", "lbs"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "oz",
+        UnitCategory::Weight,
+        28.349_523_125,
+        0.0,
+        &["ounce", "ounces"],
+    )?;
+    Ok(())
+}
+
+fn init_temperature_units(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+) -> Result<()> {
+    add_unit_static(
+        units,
+        aliases,
+        "C",
+        UnitCategory::Temperature,
+        1.0,
+        0.0,
+        &["Celsius", "celsius", "centigrade"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "F",
+        UnitCategory::Temperature,
+        5.0 / 9.0,
+        -32.0,
+        &["Fahrenheit", "fahrenheit"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "K",
+        UnitCategory::Temperature,
+        1.0,
+        -273.15,
+        &["Kelvin", "kelvin"],
+    )?;
+    Ok(())
+}
+
+fn init_time_units(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+) -> Result<()> {
+    add_unit_static(units, aliases, "s", UnitCategory::Time, 1.0, 0.0, &[
+        "second", "seconds", "sec",
+    ])?;
+    add_unit_static(
+        units,
+        aliases,
+        "ms",
+        UnitCategory::Time,
+        0.001,
+        0.0,
+        &["millisecond", "milliseconds"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "min",
+        UnitCategory::Time,
+        60.0,
+        0.0,
+        &["minute", "minutes"],
+    )?;
+    add_unit_static(
+        units,
+        aliases,
+        "h",
+        UnitCategory::Time,
+        3600.0,
+        0.0,
+        &["hour", "hours"],
+    )?;
+    Ok(())
 }
 
 fn get_db_path() -> Result<PathBuf> {
@@ -222,5 +628,51 @@ mod tests {
             .unwrap();
         let entry = db.get_rate("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Crypto as u8);
+    }
+
+    #[test]
+    fn test_resolve_symbol() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.init_static_units().unwrap();
+
+        // Direct match
+        assert_eq!(db.resolve_symbol("m").unwrap(), "m");
+
+        // Alias match
+        assert_eq!(db.resolve_symbol("meters").unwrap(), "m");
+
+        // Case-insensitive alias match
+        assert_eq!(db.resolve_symbol("Celsius").unwrap(), "C");
+
+        // Unknown unit falls back to itself
+        assert_eq!(db.resolve_symbol("unknown").unwrap(), "unknown");
+    }
+
+    #[test]
+    fn test_init_static_units() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.init_static_units().unwrap();
+
+        let m = db.get_unit("m").unwrap().unwrap();
+        assert_eq!(m.category, UnitCategory::Length as u8);
+        assert_eq!(m.factor, 1.0);
+
+        let km = db.get_unit("km").unwrap().unwrap();
+        assert_eq!(km.factor, 1000.0);
+
+        let f = db.get_unit("F").unwrap().unwrap();
+        assert_eq!(f.category, UnitCategory::Temperature as u8);
+        assert!((f.factor - 5.0 / 9.0).abs() < f64::EPSILON);
+        assert_eq!(f.offset, -32.0);
     }
 }
