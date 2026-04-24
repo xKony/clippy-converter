@@ -1,62 +1,16 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::models::{RateSource, UnitCategory, UnitEntry};
-
-/// Schema for the rates table: Symbol -> (Price, Timestamp, `SourceID`)
-/// DEPRECATED: Use `UNITS_TABLE` instead.
-const RATES_TABLE: TableDefinition<&str, RateEntry> = TableDefinition::new("rates");
 
 /// Schema for unified units and currency rates.
 const UNITS_TABLE: TableDefinition<&str, UnitEntry> = TableDefinition::new("units_v2");
 
 /// Schema for unit aliases (e.g., "meters" -> "m").
 const ALIASES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("aliases");
-
-/// A single rate entry stored in the database.
-/// DEPRECATED: Use `UnitEntry` instead.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RateEntry {
-    /// The price relative to the internal base (EUR).
-    pub price: f64,
-    /// Unix timestamp of the update.
-    pub timestamp: i64,
-    /// The source identifier.
-    pub source: u8,
-}
-
-// Implement redb::Value for RateEntry using bincode serialization.
-impl redb::Value for RateEntry {
-    type SelfType<'a> = Self;
-    type AsBytes<'a> = Vec<u8>;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        bincode::deserialize(data).unwrap_or(Self {
-            price: 0.0,
-            timestamp: 0,
-            source: 0,
-        })
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> {
-        bincode::serialize(value).unwrap_or_default()
-    }
-
-    fn type_name() -> redb::TypeName {
-        redb::TypeName::new("RateEntry")
-    }
-}
 
 // Implement redb::Value for UnitEntry using bincode serialization.
 impl redb::Value for UnitEntry {
@@ -119,9 +73,6 @@ impl Db {
         let write_txn = db.begin_write().context("Failed to begin init transaction")?;
         {
             let _ = write_txn
-                .open_table(RATES_TABLE)
-                .context("Failed to create rates table")?;
-            let _ = write_txn
                 .open_table(UNITS_TABLE)
                 .context("Failed to create units table")?;
             let _ = write_txn
@@ -159,36 +110,21 @@ impl Db {
             .begin_write()
             .context("Failed to begin write transaction")?;
         {
-            let mut table = write_txn
-                .open_table(RATES_TABLE)
-                .context("Failed to open rates table")?;
             let mut units_table = write_txn
                 .open_table(UNITS_TABLE)
                 .context("Failed to open units table")?;
 
-            let should_update = table
+            let should_update = units_table
                 .get(symbol)
-                .context("Failed to read existing rate")?
+                .context("Failed to read existing unit")?
                 .is_none_or(|existing| {
-                    let existing_val: RateEntry = existing.value();
+                    let existing_val: UnitEntry = existing.value();
                     (source as u8 > existing_val.source)
                         || (source as u8 == existing_val.source
                             && timestamp > existing_val.timestamp)
                 });
 
             if should_update {
-                table
-                    .insert(
-                        symbol,
-                        RateEntry {
-                            price,
-                            timestamp,
-                            source: source as u8,
-                        },
-                    )
-                    .context("Failed to insert rate into database")?;
-
-                // Also update the unified UNITS_TABLE
                 // Factor must be "EUR per 1 Unit" so that Base_EUR = Value * Factor.
                 // - Fiat rates are "Units per 1 EUR" (e.g. 1.08 USD/EUR), so Factor = 1/price.
                 // - Crypto rates are already "EUR per 1 Unit" (e.g. 60000 EUR/BTC), so Factor = price.
@@ -216,22 +152,6 @@ impl Db {
             .commit()
             .context("Failed to commit write transaction")?;
         Ok(())
-    }
-
-    /// Retrieves a rate for a given symbol from the deprecated rates table.
-    ///
-    /// # Errors
-    /// Returns an error if the read transaction fails.
-    pub fn get_rate(&self, symbol: &str) -> Result<Option<RateEntry>> {
-        let read_txn = self
-            .inner
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(RATES_TABLE)
-            .context("Failed to open rates table")?;
-        let result = table.get(symbol).context("Failed to query symbol")?;
-        Ok(result.map(|r| r.value()))
     }
 
     /// Returns a list of all symbols stored in the database.
@@ -680,23 +600,29 @@ mod tests {
         };
 
         // 1. Insert Fiat rate
+        // 1 EUR = 50000 BTC (Incredibly cheap BTC in this test!)
+        // factor = 1/50000
         db.update_rate("BTC", 50000.0, 1000, RateSource::Fiat)
             .unwrap();
-        let entry = db.get_rate("BTC").unwrap().unwrap();
+        let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Fiat as u8);
+        assert!((entry.factor - (1.0 / 50000.0)).abs() < f64::EPSILON);
 
-        // 2. Insert Crypto rate (Higher priority, even if older - though normally it wouldn't be)
+        // 2. Insert Crypto rate (Higher priority)
+        // 1 BTC = 51000 EUR
+        // factor = 51000
         db.update_rate("BTC", 51000.0, 900, RateSource::Crypto)
             .unwrap();
-        let entry = db.get_rate("BTC").unwrap().unwrap();
+        let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Crypto as u8);
-        assert_eq!(entry.price, 51000.0);
+        assert_eq!(entry.factor, 51000.0);
 
-        // 3. Try to overwrite Crypto with older Fiat (Should fail)
+        // 3. Try to overwrite Crypto with newer Fiat (Should fail due to lower source priority)
         db.update_rate("BTC", 49000.0, 1100, RateSource::Fiat)
             .unwrap();
-        let entry = db.get_rate("BTC").unwrap().unwrap();
+        let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Crypto as u8);
+        assert_eq!(entry.factor, 51000.0);
     }
 
     #[test]

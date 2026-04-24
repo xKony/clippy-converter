@@ -429,6 +429,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                         .outputs
                         .iter()
                         .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
+                        .take(state.config.list_size)
                         .map(|output| {
                             let is_favorite = state.config.favorites.contains(&output.unit);       
                             let favorite_label = if is_favorite { "★" } else { "☆" };
@@ -503,6 +504,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                             u.symbol.to_lowercase().contains(&search_query_lower)
                                 || u.aliases.iter().any(|a| a.to_lowercase().contains(&search_query_lower))
                         })
+                        .take(state.config.list_size)
                         .map(|unit| {
                             let aliases_str = if unit.aliases.is_empty() {
                                 String::new()

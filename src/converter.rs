@@ -76,11 +76,6 @@ impl Converter {
             }
         });
 
-        // Limit results
-        if outputs.len() > self.config.list_size {
-            outputs.truncate(self.config.list_size);
-        }
-
         Ok(ConversionResult {
             input_value: value,
             input_unit: from_input.to_string(),
