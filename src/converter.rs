@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::models::{Config, ConversionResult, ConvertedValue};
+use crate::models::{Config, ConversionResult, ConvertedValue, UnitInfo};
 use anyhow::{Result, anyhow};
 
 /// The core conversion engine.
@@ -17,17 +17,18 @@ impl Converter {
         Self { config, db }
     }
 
-    /// Returns a list of all supported unit and currency symbols.
+    /// Returns a list of all supported units with their aliases.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
-    pub fn get_all_units(&self) -> Result<Vec<String>> {
-        // Since we unified everything into UNITS_TABLE (mostly),
-        // we might want a new method in DB to get all units.
-        // For now, let's just use what we have or implement it in Db if needed.
-        // But the plan didn't specify get_all_units update.
-        // Let's assume Db::get_all_symbols still works for now if we kept it.
-        self.db.get_all_symbols()
+    pub fn get_all_units(&self) -> Result<Vec<UnitInfo>> {
+        let unit_map = self.db.get_all_units_with_aliases()?;
+        let mut result: Vec<UnitInfo> = unit_map
+            .into_iter()
+            .map(|(symbol, aliases)| UnitInfo { symbol, aliases })
+            .collect();
+        result.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        Ok(result)
     }
 
     /// Converts a numeric value from one unit to all compatible target units.

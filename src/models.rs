@@ -154,6 +154,15 @@ pub struct UnitEntry {
     pub source: u8,
 }
 
+/// Structured unit information for the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnitInfo {
+    /// Canonical symbol (e.g., "m").
+    pub symbol: String,
+    /// List of aliases (e.g., `["meter", "meters"]`).
+    pub aliases: Vec<String>,
+}
+
 /// Helper to save a serializable value as pretty JSON to a file.
 ///
 /// # Errors

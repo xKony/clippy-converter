@@ -251,6 +251,49 @@ impl Db {
         Ok(symbols)
     }
 
+    /// Returns all canonical symbols with their associated aliases.
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or iteration fails.
+    pub fn get_all_units_with_aliases(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let read_txn = self
+            .inner
+            .begin_read()
+            .context("Failed to begin read transaction")?;
+        let units_table = read_txn
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
+        let alias_table = read_txn
+            .open_table(ALIASES_TABLE)
+            .context("Failed to open aliases table")?;
+
+        let mut unit_map = std::collections::HashMap::new();
+
+        // 1. Collect all canonical symbols
+        for result in units_table.iter().context("Failed to iterate units")? {
+            let (key, _) = result.context("Failed to read unit row")?;
+            unit_map.insert(key.value().to_string(), Vec::new());
+        }
+
+        // 2. Collect all aliases and group them by canonical symbol
+        for result in alias_table.iter().context("Failed to iterate aliases")? {
+            let (alias, canonical) = result.context("Failed to read alias row")?;
+            let canonical_str = canonical.value();
+            let alias_str = alias.value();
+
+            if let Some(aliases) = unit_map.get_mut(canonical_str) {
+                // Only add if it's actually an alias (not just the lowercase version of the symbol itself)
+                if alias_str.to_lowercase() != canonical_str.to_lowercase()
+                    && !aliases.contains(&alias_str.to_string())
+                {
+                    aliases.push(alias_str.to_string());
+                }
+            }
+        }
+
+        Ok(unit_map)
+    }
+
     /// Resolves a unit symbol or alias to its canonical form.
     ///
     /// # Errors

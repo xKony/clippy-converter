@@ -490,14 +490,36 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                 column(
                     all_units
                         .into_iter()
-                        .filter(|u| u.to_lowercase().contains(&search_query_lower))
+                        .filter(|u| {
+                            u.symbol.to_lowercase().contains(&search_query_lower)
+                                || u.aliases.iter().any(|a| a.to_lowercase().contains(&search_query_lower))
+                        })
                         .map(|unit| {
-                            button(text(unit.clone()).color(Color::WHITE))
-                                .on_press(Message::SelectSourceUnit(unit))
-                                .width(Length::Fill)
-                                .padding(10)
-                                .style(button::secondary)
-                                .into()
+                            let aliases_str = if unit.aliases.is_empty() {
+                                String::new()
+                            } else {
+                                format!("({})", unit.aliases.join(", "))
+                            };
+
+                            button(
+                                column![
+                                    text(unit.symbol.clone()).color(Color::WHITE),
+                                    if unit.aliases.is_empty() {
+                                        Element::from(column![])
+                                    } else {
+                                        text(aliases_str)
+                                            .size(12)
+                                            .color(Color::from_rgb8(120, 120, 120))
+                                            .into()
+                                    }
+                                ]
+                                .spacing(2)
+                            )
+                            .on_press(Message::SelectSourceUnit(unit.symbol))
+                            .width(Length::Fill)
+                            .padding(10)
+                            .style(button::secondary)
+                            .into()
                         })
                 )
                 .spacing(5)
