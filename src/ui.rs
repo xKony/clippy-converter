@@ -93,9 +93,9 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
     // Hotkeys
     let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager"); 
     let hk = hotkey::parse_hotkey(&config.hotkey).expect("Failed to parse hotkey");
-    hotkey_manager
-        .register(hk)
-        .expect("Failed to register hotkey");
+    if let Err(e) = hotkey_manager.register(hk) {
+        eprintln!("Warning: Failed to register hotkey {}: {}", config.hotkey, e);
+    }
 
     // Tray Icon
     let tray_menu = Menu::with_items(&[
@@ -357,7 +357,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
                 clippy::cast_precision_loss,
                 reason = "Screen coordinates fit in f32 mantissa"
             )]
-            let (_, open_task) = window::open(window::Settings {
+            let settings = window::Settings {
                 size: (350.0, 400.0).into(),
                 position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),        
                 decorations: false,
@@ -368,9 +368,15 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
 
-            return open_task.map(Message::WindowOpened);
+            // If a window is already open, close it first
+            if let Some(id) = state.window_id {
+                return window::close::<Message>(id).then(move |_| {
+                    window::open(settings.clone()).1.map(Message::WindowOpened)
+                });
+            }
+            return window::open(settings).1.map(Message::WindowOpened);
         }
     }
     Task::none()
