@@ -5,18 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::models::RateSource;
+
 /// Schema for the rates table: Symbol -> (Price, Timestamp, `SourceID`)
 const RATES_TABLE: TableDefinition<&str, RateEntry> = TableDefinition::new("rates");
-
-/// Represents the source of a currency rate.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RateSource {
-    /// Daily fallback from fiat API.
-    Fiat = 0,
-    /// High-frequency update from crypto API.
-    Crypto = 1,
-}
 
 /// A single rate entry stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

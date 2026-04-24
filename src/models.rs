@@ -111,6 +111,49 @@ pub struct ConversionResult {
     pub outputs: Vec<ConvertedValue>,
 }
 
+/// Represents the source of a currency rate or unit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RateSource {
+    /// Daily fallback from fiat API.
+    Fiat = 0,
+    /// High-frequency update from crypto API.
+    Crypto = 1,
+    /// Static baked-in unit.
+    Static = 2,
+}
+
+/// Categories for compatible groups of units.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnitCategory {
+    /// Monetary units (e.g., USD, EUR).
+    Currency = 0,
+    /// Linear measurements (e.g., m, ft).
+    Length = 1,
+    /// Mass measurements (e.g., kg, lb).
+    Weight = 2,
+    /// Thermal measurements (e.g., C, F, K).
+    Temperature = 3,
+    /// Time measurements (e.g., s, ms).
+    Time = 4,
+}
+
+/// A unified rate/unit entry stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnitEntry {
+    /// Factor to multiply the base value.
+    pub factor: f64,
+    /// Offset to add to the value before multiplying.
+    pub offset: f64,
+    /// Unit category (matches `UnitCategory`).
+    pub category: u8,
+    /// Timestamp of last update.
+    pub timestamp: i64,
+    /// Source of the rate.
+    pub source: u8,
+}
+
 /// Helper to save a serializable value as pretty JSON to a file.
 ///
 /// # Errors

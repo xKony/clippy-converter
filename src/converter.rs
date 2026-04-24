@@ -227,7 +227,7 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> f64 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
-    use crate::db::RateSource;
+    use crate::models::RateSource;
     use redb::Database;
     use std::sync::Arc;
     use tempfile::NamedTempFile;

@@ -1,6 +1,6 @@
 use crate::api::{fetch_binance_tickers, fetch_fiat_rates};
-use crate::db::{Db, RateSource};
-use crate::models::Config;
+use crate::db::Db;
+use crate::models::{Config, RateSource};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::time::Duration;
