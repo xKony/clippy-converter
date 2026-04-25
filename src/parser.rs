@@ -45,18 +45,15 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         ('₽', "RUB"),
     ];
 
+    let mut symbol_unit = None;
+    let mut core_input = input;
+
     // Check for leading currency symbol
     for (sym, unit) in symbols {
         if input.starts_with(sym) {
-            let value_raw = input[sym.len_utf8()..].trim();
-            let value_str = value_raw.replace(|c: char| c.is_whitespace(), "");
-            let value: f64 = value_str
-                .parse()
-                .map_err(|_| anyhow!("Invalid number format after symbol: {value_raw}"))?;
-            return Ok(ParsedInput {
-                value,
-                unit: Some(unit.to_string()),
-            });
+            symbol_unit = Some(unit);
+            core_input = input[sym.len_utf8()..].trim();
+            break;
         }
     }
 
@@ -67,7 +64,7 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
     let mut found_e = false;
     let mut last_char_was_e = false;
 
-    for (i, c) in input.char_indices() {
+    for (i, c) in core_input.char_indices() {
         if c.is_ascii_digit() {
             found_digit = true;
             number_end = i + 1;
@@ -85,7 +82,7 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
             last_char_was_e = false;
         } else if c.is_whitespace() {
             // Peek ahead to see if more digits, a decimal, or scientific notation follows
-            let remaining = &input[i + 1..];
+            let remaining = &core_input[i + 1..];
             let mut is_part_of_number = false;
             let temp_decimal = found_decimal;
             let temp_e = found_e;
@@ -124,17 +121,25 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         return Err(anyhow!("No numeric value found in: {input}"));
     }
 
-    let value_raw = &input[..number_end];
+    let value_raw = &core_input[..number_end];
     let value_str = value_raw.replace(|c: char| c.is_whitespace(), "");
     let value: f64 = value_str
         .parse()
         .map_err(|_| anyhow!("Failed to parse numeric part: {value_raw}"))?;
 
-    let unit_str = input[number_end..].trim();
-    let unit = if unit_str.is_empty() {
-        None
-    } else {
-        Some(unit_str.to_string())
+    let unit_str = core_input[number_end..].trim();
+    let unit = match (unit_str.is_empty(), symbol_unit) {
+        (true, None) => None,
+        (false, None) => Some(unit_str.to_string()),
+        (true, Some(s)) => Some(s.to_string()),
+        (false, Some(s)) => {
+            // If the found unit already starts with or is the symbol's unit, don't duplicate
+            if unit_str.eq_ignore_ascii_case(s) || unit_str.to_lowercase().ends_with(s.to_lowercase().as_str()) {
+                 Some(unit_str.to_string())
+            } else {
+                 Some(format!("{unit_str} {s}"))
+            }
+        }
     };
 
     Ok(ParsedInput { value, unit })
@@ -212,5 +217,20 @@ mod tests {
         let res = parse_input("-2.5e+4").unwrap();
         assert_eq!(res.value, -25000.0);
         assert_eq!(res.unit, None);
+    }
+
+    #[test]
+    fn test_parse_symbol_with_multiplier() {
+        let res = parse_input("$100B").unwrap();
+        assert_eq!(res.value, 100.0);
+        assert_eq!(res.unit, Some("B USD".to_string()));
+
+        let res = parse_input("$ 39.6 BILLION").unwrap();
+        assert_eq!(res.value, 39.6);
+        assert_eq!(res.unit, Some("BILLION USD".to_string()));
+
+        let res = parse_input("€1.5M").unwrap();
+        assert_eq!(res.value, 1.5);
+        assert_eq!(res.unit, Some("M EUR".to_string()));
     }
 }
