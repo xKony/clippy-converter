@@ -36,8 +36,22 @@ impl Converter {
     /// # Errors
     /// Returns an error if the input unit is unknown or if the conversion fails.
     pub fn convert(&self, value: f64, from_input: &str) -> Result<ConversionResult> {
+        let mut actual_value = value;
+        let mut parsed_unit = from_input;
+
+        // 1. Check for currency multipliers (e.g., "B USD")
+        if let Some((factor, rest)) = extract_currency_multiplier(from_input) {
+            let resolved_rest = self.db.resolve_symbol(rest)?;
+            if let Ok(Some(entry)) = self.db.get_unit(&resolved_rest) {
+                if entry.category == crate::models::UnitCategory::Currency as u8 {
+                    actual_value *= factor;
+                    parsed_unit = rest;
+                }
+            }
+        }
+
         // Resolve "kilometers" to "km"
-        let from_unit = self.db.resolve_symbol(from_input)?;
+        let from_unit = self.db.resolve_symbol(parsed_unit)?;
 
         let entry = self
             .db
@@ -45,7 +59,7 @@ impl Converter {
             .ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
 
         // Math: Base = (Input + Offset) * Factor
-        let base_value = (value + entry.offset) * entry.factor;
+        let base_value = (actual_value + entry.offset) * entry.factor;
 
         let mut outputs = Vec::new();
         let targets = self.db.get_category_units(entry.category)?;
@@ -86,6 +100,28 @@ impl Converter {
     }
 }
 
+/// Extracts a currency multiplier from the start of the unit string.
+fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
+    let input = input.trim();
+    let multipliers = [
+        ("k ", 1e3),
+        ("m ", 1e6),
+        ("b ", 1e9),
+        ("t ", 1e12),
+        ("thousand ", 1e3),
+        ("million ", 1e6),
+        ("billion ", 1e9),
+        ("trillion ", 1e12),
+    ];
+    let lower = input.to_lowercase();
+    for (prefix, factor) in multipliers {
+        if lower.starts_with(prefix) {
+            return Some((factor, input[prefix.len()..].trim()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
@@ -121,10 +157,7 @@ mod tests {
         // EUR is base (factor 1.0, offset 0.0)
         db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
             .unwrap();
-        // USD (e.g. 1.1 USD per 1 EUR) -> factor = 1/1.1 ?
-        // Wait, if Base = (Value + Offset) * Factor, and Base is EUR.
-        // For USD: Base_EUR = (Value_USD + 0) * (1/1.1)
-        // So factor = 1.0 / 1.1
+        // USD (e.g. 1.1 USD per 1 EUR) -> factor = 1/1.1
         db.update_unit(
             "USD",
             1.0 / 1.1,
@@ -222,5 +255,26 @@ mod tests {
 
         // "ft" should be first because it's a favorite
         assert_eq!(res.outputs[0].unit, "ft");
+    }
+
+    #[test]
+    fn test_currency_multipliers() {
+        let config = Config::default();
+        let db = create_test_db();
+        db.update_unit("USD", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
+        db.update_unit("EUR", 0.9, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
+        let converter = Converter::new(config, db);
+
+        let res = converter.convert(1.5, "B USD").unwrap();
+        assert_eq!(res.input_value, 1.5);
+        assert_eq!(res.input_unit, "B USD");
+        
+        let eur = res.outputs.iter().find(|o| o.unit == "EUR").unwrap();
+        // 1.5B USD -> 1,500,000,000 USD. 
+        // 1 USD = 1 Base
+        // Base = 1.5e9.
+        // EUR factor = 0.9.
+        // Target_EUR = (1.5e9 / 0.9) = 1,666,666,666.66...
+        assert!((eur.value - 1_666_666_666.6).abs() < 1.0);
     }
 }
