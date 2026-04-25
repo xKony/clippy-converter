@@ -193,8 +193,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.captured_unit = Some(unit);
                 state.search_query = String::new();
                 log_conversion_if_enabled(state);
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
             }
-            Task::none()
         }
         Message::ToggleFavorite(unit) => {
             if let Some(pos) = state.config.favorites.iter().position(|f| f == &unit) {
@@ -211,8 +213,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.current_result = Some(result);
                 state.search_query = String::new();
                 log_conversion_if_enabled(state);
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
             }
-            Task::none()
         }
         Message::CloseWindow => state.window_id.map_or_else(Task::none, window::close),
         Message::OpenSettings => {
