@@ -44,6 +44,7 @@ pub enum Message {
     WindowFocused(window::Id),
     SettingsWindowOpened(window::Id),
     SearchChanged(String),
+    SubmitSearch,
     SelectSourceUnit(String),
     ToggleFavorite(String),
     Swap(f64, String),
@@ -185,6 +186,39 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::SearchChanged(query) => {
             state.search_query = query;
+            Task::none()
+        }
+        Message::SubmitSearch => {
+            if state.current_result.is_none() {
+                let query_lower = state.search_query.to_lowercase();
+                if query_lower.is_empty() {
+                    return Task::none();
+                }
+
+                let all_units = state.converter.get_all_units().unwrap_or_default();
+
+                // 1. Try to find exact match (case-insensitive)
+                let exact_match = all_units.iter().find(|u| {
+                    u.symbol.to_lowercase() == query_lower
+                        || u.aliases.iter().any(|a| a.to_lowercase() == query_lower)
+                });
+
+                if let Some(unit) = exact_match {
+                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
+                }
+
+                // 2. Fallback to first partial match
+                let partial_match = all_units.iter().find(|u| {
+                    u.symbol.to_lowercase().contains(&query_lower)
+                        || u.aliases
+                            .iter()
+                            .any(|a| a.to_lowercase().contains(&query_lower))
+                });
+
+                if let Some(unit) = partial_match {
+                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
+                }
+            }
             Task::none()
         }
         Message::SelectSourceUnit(unit) => {
@@ -436,6 +470,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
             text_input("Search units...", &state.search_query)
                 .id(TextInputId::new("search_input"))
                 .on_input(Message::SearchChanged)
+                .on_submit(Message::SubmitSearch)
                 .padding(10)
                 .size(16),
             scrollable(
@@ -510,6 +545,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
             text_input("Search source unit...", &state.search_query)
                 .id(TextInputId::new("search_input"))
                 .on_input(Message::SearchChanged)
+                .on_submit(Message::SubmitSearch)
                 .padding(10)
                 .size(16),
             scrollable(
