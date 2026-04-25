@@ -10,7 +10,6 @@ use iced::widget::{
 };
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
-use std::time::Duration;
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -559,15 +558,22 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 pub fn subscription(_state: &State) -> Subscription<Message> {
     let hotkey_sub = Subscription::run(|| {
         iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let receiver = GlobalHotKeyEvent::receiver();
-            loop {
-                if let Ok(event) = receiver.try_recv()
-                    && event.state == HotKeyState::Pressed
-                {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            std::thread::spawn(move || {
+                let receiver = GlobalHotKeyEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            while let Some(event) = rx.recv().await {
+                if event.state == HotKeyState::Pressed {
                     use iced::futures::SinkExt;
                     let _ = output.send(Message::HotkeyTriggered).await;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
     });
@@ -582,21 +588,28 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
 
     let tray_sub = Subscription::run(|| {
         iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let receiver = MenuEvent::receiver();
-            loop {
-                if let Ok(event) = receiver.try_recv() {
-                    use iced::futures::SinkExt;
-                    match event.id.0.as_str() {
-                        "quit" => {
-                            let _ = output.send(Message::ExitRequested).await;
-                        }
-                        "settings" => {
-                            let _ = output.send(Message::OpenSettings).await;
-                        }
-                        _ => {}
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            std::thread::spawn(move || {
+                let receiver = MenuEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    if tx.send(event).is_err() {
+                        break;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            });
+
+            while let Some(event) = rx.recv().await {
+                use iced::futures::SinkExt;
+                match event.id.0.as_str() {
+                    "quit" => {
+                        let _ = output.send(Message::ExitRequested).await;
+                    }
+                    "settings" => {
+                        let _ = output.send(Message::OpenSettings).await;
+                    }
+                    _ => {}
+                }
             }
         })
     });

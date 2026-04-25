@@ -80,7 +80,7 @@ impl ClipboardManager {
                 captured_text = text;
                 break;
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(2));
         }
 
         // 5. Restore original content if it existed

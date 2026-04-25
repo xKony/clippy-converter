@@ -183,7 +183,7 @@ mod tests {
         // Target_PLN = 50000 / 0.25 = 200000
         let res = converter.convert(1.0, "BTC").unwrap();
         let pln = res.outputs.iter().find(|o| o.unit == "PLN").unwrap();
-        assert!((pln.value - 200000.0).abs() < f64::EPSILON);
+        assert!((pln.value - 200_000.0).abs() < f64::EPSILON);
 
         // Convert 4 PLN to BTC
         // Base_EUR = 4 * 0.25 = 1.0
