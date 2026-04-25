@@ -6,7 +6,7 @@ use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
+    button, checkbox, column, container, pick_list, row, scrollable, text, text_input, Id as TextInputId,
 };
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
@@ -151,7 +151,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
             state.is_opening_window = false;
-            Task::none()
+            iced::widget::operation::focus(TextInputId::new("search_input"))
         }
         Message::WindowClosed(id) => {
             if state.window_id == Some(id) {
@@ -419,6 +419,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
             ]
             .align_y(Alignment::Center),
             text_input("Search units...", &state.search_query)
+                .id(TextInputId::new("search_input"))
                 .on_input(Message::SearchChanged)
                 .padding(10)
                 .size(16),
@@ -492,6 +493,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
             ]
             .align_y(Alignment::Center),
             text_input("Search source unit...", &state.search_query)
+                .id(TextInputId::new("search_input"))
                 .on_input(Message::SearchChanged)
                 .padding(10)
                 .size(16),
