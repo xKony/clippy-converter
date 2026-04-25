@@ -64,20 +64,44 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
     let mut number_end = 0;
     let mut found_digit = false;
     let mut found_decimal = false;
+    let mut found_e = false;
+    let mut last_char_was_e = false;
 
     for (i, c) in input.char_indices() {
         if c.is_ascii_digit() {
             found_digit = true;
             number_end = i + 1;
-        } else if c == '.' && !found_decimal {
+            last_char_was_e = false;
+        } else if c == '.' && !found_decimal && !found_e {
             found_decimal = true;
             number_end = i + 1;
+            last_char_was_e = false;
+        } else if (c == 'e' || c == 'E') && found_digit && !found_e {
+            found_e = true;
+            last_char_was_e = true;
+            number_end = i + 1;
+        } else if (c == '+' || c == '-') && last_char_was_e {
+            number_end = i + 1;
+            last_char_was_e = false;
         } else if c.is_whitespace() {
-            // Peek ahead to see if more digits or a decimal follow
+            // Peek ahead to see if more digits, a decimal, or scientific notation follows
             let remaining = &input[i + 1..];
             let mut is_part_of_number = false;
+            let mut temp_decimal = found_decimal;
+            let mut temp_e = found_e;
+            let mut temp_last_e = last_char_was_e;
+
             for nc in remaining.chars() {
-                if nc.is_ascii_digit() || (nc == '.' && !found_decimal) {
+                if nc.is_ascii_digit() {
+                    is_part_of_number = true;
+                    break;
+                } else if nc == '.' && !temp_decimal && !temp_e {
+                    is_part_of_number = true;
+                    break;
+                } else if (nc == 'e' || nc == 'E') && !temp_e {
+                    is_part_of_number = true;
+                    break;
+                } else if (nc == '+' || nc == '-') && temp_last_e {
                     is_part_of_number = true;
                     break;
                 } else if !nc.is_whitespace() {
@@ -178,5 +202,20 @@ mod tests {
         assert!(parse_input("abc").is_err());
         assert!(parse_input("").is_err());
         assert!(parse_input("$").is_err());
+    }
+
+    #[test]
+    fn test_parse_scientific_notation() {
+        let res = parse_input("1e-9 meters").unwrap();
+        assert_eq!(res.value, 1e-9);
+        assert_eq!(res.unit, Some("meters".to_string()));
+
+        let res = parse_input("1.5E3 USD").unwrap();
+        assert_eq!(res.value, 1500.0);
+        assert_eq!(res.unit, Some("USD".to_string()));
+
+        let res = parse_input("-2.5e+4").unwrap();
+        assert_eq!(res.value, -25000.0);
+        assert_eq!(res.unit, None);
     }
 }
