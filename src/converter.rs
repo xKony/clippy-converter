@@ -51,12 +51,25 @@ impl Converter {
         }
 
         // Resolve "kilometers" to "km"
-        let from_unit = self.db.resolve_symbol(parsed_unit)?;
+        let mut from_unit = self.db.resolve_symbol(parsed_unit)?;
 
-        let entry = self
-            .db
-            .get_unit(&from_unit)?
-            .ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
+        let mut entry_opt = self.db.get_unit(&from_unit)?;
+
+        // 2. Metric prefix fallback
+        if entry_opt.is_none() {
+            if let Some((factor, rest)) = extract_metric_prefix(parsed_unit) {
+                let resolved_rest = self.db.resolve_symbol(rest)?;
+                if let Ok(Some(rest_entry)) = self.db.get_unit(&resolved_rest) {
+                    if rest_entry.category != crate::models::UnitCategory::Currency as u8 {
+                        actual_value *= factor;
+                        from_unit = resolved_rest;
+                        entry_opt = Some(rest_entry);
+                    }
+                }
+            }
+        }
+
+        let entry = entry_opt.ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
 
         // Math: Base = (Input + Offset) * Factor
         let base_value = (actual_value + entry.offset) * entry.factor;
@@ -117,6 +130,35 @@ fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
     for (prefix, factor) in multipliers {
         if lower.starts_with(prefix) {
             return Some((factor, input[prefix.len()..].trim()));
+        }
+    }
+    None
+}
+
+/// Extracts a metric prefix (e.g., "kilo", "nano") from the start of the unit string.
+fn extract_metric_prefix(input: &str) -> Option<(f64, &str)> {
+    let lower = input.to_lowercase();
+    let prefixes = [
+        ("exa", 1e18),
+        ("peta", 1e15),
+        ("tera", 1e12),
+        ("giga", 1e9),
+        ("mega", 1e6),
+        ("kilo", 1e3),
+        ("hecto", 1e2),
+        ("deca", 1e1),
+        ("deci", 1e-1),
+        ("centi", 1e-2),
+        ("milli", 1e-3),
+        ("micro", 1e-6),
+        ("nano", 1e-9),
+        ("pico", 1e-12),
+        ("femto", 1e-15),
+        ("atto", 1e-18),
+    ];
+    for (prefix, factor) in prefixes {
+        if lower.starts_with(prefix) {
+            return Some((factor, &input[prefix.len()..]));
         }
     }
     None
@@ -276,5 +318,19 @@ mod tests {
         // EUR factor = 0.9.
         // Target_EUR = (1.5e9 / 0.9) = 1,666,666,666.66...
         assert!((eur.value - 1_666_666_666.6).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_metric_prefixes_fallback() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        // Convert 1 nanometer to cm
+        // 1 nanometers -> actual_value = 1e-9, from_unit = "m"
+        // 1e-9 m to cm -> Target = (1e-9 / 0.01) = 1e-7
+        let res = converter.convert(1.0, "nanometers").unwrap();
+        let cm = res.outputs.iter().find(|o| o.unit == "cm").unwrap();
+        assert!((cm.value - 1e-7).abs() < 1e-10);
     }
 }
