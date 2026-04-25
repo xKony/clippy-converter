@@ -6,7 +6,8 @@ use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
+    Id as TextInputId, Space, button, checkbox, column, container, pick_list, row, scrollable, text,
+    text_input,
 };
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
@@ -25,14 +26,23 @@ pub struct State {
     pub hotkey_id: global_hotkey::hotkey::HotKey,
     pub current_result: Option<ConversionResult>,
     pub captured_value: f64,
-    pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
     pub settings_window_id: Option<window::Id>,
     pub is_opening_window: bool,
     pub search_query: String,
+    pub search_query_lower: String,
     pub tray_icon: TrayIcon,
     pub is_recording_hotkey: bool,
     pub recorded_hotkey: Option<String>,
+    pub current_mode: WindowMode,
+    pub manual_input_value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    ValueInput,
+    SourceUnitSelection,
+    Results,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +51,14 @@ pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     WindowUnfocused(window::Id),
+    WindowFocused(window::Id),
     SettingsWindowOpened(window::Id),
     SearchChanged(String),
+    SubmitSearch,
+    ManualInputValueChanged(String),
+    SubmitManualInputValue,
+    EditValue,
+    EditSourceUnit,
     SelectSourceUnit(String),
     ToggleFavorite(String),
     Swap(f64, String),
@@ -55,7 +71,6 @@ pub enum Message {
     CryptoIntervalChanged(String),
     StartHotkeyRecording,
     CancelHotkeyRecording,
-    HotkeyRecorded(String),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     SaveConfig,
     ExitRequested,
@@ -66,12 +81,6 @@ pub enum Message {
 pub struct BootParams {
     pub config: Config,
     pub db: Db,
-}
-
-/// The title of the application.
-#[must_use]
-pub fn title() -> String {
-    String::from("Clippy Converter")
 }
 
 /// Initializes the application state.
@@ -88,13 +97,16 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
 
     // Infrastructure
     let clipboard = ClipboardManager::new().expect("Failed to initialize clipboard");
-    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");        
+    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");
 
     // Hotkeys
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager"); 
+    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager");
     let hk = hotkey::parse_hotkey(&config.hotkey).expect("Failed to parse hotkey");
     if let Err(e) = hotkey_manager.register(hk) {
-        eprintln!("Warning: Failed to register hotkey {}: {}", config.hotkey, e);
+        eprintln!(
+            "Warning: Failed to register hotkey {}: {}",
+            config.hotkey, e
+        );
     }
 
     // Tray Icon
@@ -121,14 +133,16 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
             hotkey_id: hk,
             current_result: None,
             captured_value: 0.0,
-            captured_unit: None,
             window_id: None,
             settings_window_id: None,
             is_opening_window: false,
             search_query: String::new(),
+            search_query_lower: String::new(),
             tray_icon,
             is_recording_hotkey: false,
             recorded_hotkey: None,
+            current_mode: WindowMode::SourceUnitSelection,
+            manual_input_value: String::new(),
         },
         Task::done(Message::SpawnWorkers),
     )
@@ -143,7 +157,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SpawnWorkers => {
             let db = state.db.clone();
             let config = state.config.clone();
-            tokio::spawn(crate::workers::start_fiat_worker(db.clone(), config.clone()));
+            tokio::spawn(crate::workers::start_fiat_worker(
+                db.clone(),
+                config.clone(),
+            ));
             tokio::spawn(crate::workers::start_crypto_worker(db, config));
             Task::none()
         }
@@ -151,7 +168,15 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
             state.is_opening_window = false;
-            Task::none()
+            let focus_id = if state.current_mode == WindowMode::ValueInput {
+                "value_input"
+            } else {
+                "search_input"
+            };
+            Task::batch([
+                window::gain_focus(id),
+                iced::widget::operation::focus(TextInputId::new(focus_id)),
+            ])
         }
         Message::WindowClosed(id) => {
             if state.window_id == Some(id) {
@@ -168,22 +193,98 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::WindowFocused(id) => {
+            if state.window_id == Some(id) {
+                let focus_id = if state.current_mode == WindowMode::ValueInput {
+                    "value_input"
+                } else {
+                    "search_input"
+                };
+                iced::widget::operation::focus(TextInputId::new(focus_id))
+            } else {
+                Task::none()
+            }
+        }
         Message::SettingsWindowOpened(id) => {
             state.settings_window_id = Some(id);
-            Task::none()
+            window::gain_focus(id)
         }
         Message::SearchChanged(query) => {
+            state.search_query_lower = query.to_lowercase();
             state.search_query = query;
             Task::none()
+        }
+        Message::SubmitSearch => {
+            if state.current_mode == WindowMode::SourceUnitSelection {
+                if state.search_query_lower.is_empty() {
+                    return Task::none();
+                }
+
+                let all_units = state.converter.get_all_units().unwrap_or_default();
+
+                // 1. Try to find exact match (case-insensitive)
+                let exact_match = all_units.iter().find(|u| {
+                    u.symbol.to_lowercase() == state.search_query_lower
+                        || u.aliases
+                            .iter()
+                            .any(|a| a.to_lowercase() == state.search_query_lower)
+                });
+
+                if let Some(unit) = exact_match {
+                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
+                }
+
+                // 2. Fallback to first partial match
+                let partial_match = all_units.iter().find(|u| {
+                    u.symbol.to_lowercase().contains(&state.search_query_lower)
+                        || u.aliases
+                            .iter()
+                            .any(|a| a.to_lowercase().contains(&state.search_query_lower))
+                });
+
+                if let Some(unit) = partial_match {
+                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
+                }
+            }
+            Task::none()
+        }
+        Message::ManualInputValueChanged(val) => {
+            state.manual_input_value = val;
+            Task::none()
+        }
+        Message::SubmitManualInputValue => {
+            if let Ok(val) = state.manual_input_value.parse::<f64>() {
+                state.captured_value = val;
+                state.current_mode = WindowMode::SourceUnitSelection;
+                state.search_query = String::new();
+                state.search_query_lower = String::new();
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
+            }
+        }
+        Message::EditValue => {
+            state.current_mode = WindowMode::ValueInput;
+            state.manual_input_value = state.captured_value.to_string();
+            iced::widget::operation::focus(TextInputId::new("value_input"))
+        }
+        Message::EditSourceUnit => {
+            state.current_mode = WindowMode::SourceUnitSelection;
+            state.search_query = String::new();
+            state.search_query_lower = String::new();
+            iced::widget::operation::focus(TextInputId::new("search_input"))
         }
         Message::SelectSourceUnit(unit) => {
             if let Ok(result) = state.converter.convert(state.captured_value, &unit) {
                 state.current_result = Some(result);
-                state.captured_unit = Some(unit);
+                state.current_mode = WindowMode::Results;
                 state.search_query = String::new();
+                state.search_query_lower = String::new();
                 log_conversion_if_enabled(state);
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
             }
-            Task::none()
         }
         Message::ToggleFavorite(unit) => {
             if let Some(pos) = state.config.favorites.iter().position(|f| f == &unit) {
@@ -198,10 +299,14 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Swap(value, unit) => {
             if let Ok(result) = state.converter.convert(value, &unit) {
                 state.current_result = Some(result);
+                state.current_mode = WindowMode::Results;
                 state.search_query = String::new();
+                state.search_query_lower = String::new();
                 log_conversion_if_enabled(state);
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
             }
-            Task::none()
         }
         Message::CloseWindow => state.window_id.map_or_else(Task::none, window::close),
         Message::OpenSettings => {
@@ -252,12 +357,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::CancelHotkeyRecording => {
             state.is_recording_hotkey = false;
             state.recorded_hotkey = None;
-            let _ = state.hotkey_manager.register(state.hotkey_id);
-            Task::none()
-        }
-        Message::HotkeyRecorded(val) => {
-            state.recorded_hotkey = Some(val);
-            state.is_recording_hotkey = false;
             let _ = state.hotkey_manager.register(state.hotkey_id);
             Task::none()
         }
@@ -335,59 +434,59 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
     }
     state.is_opening_window = true;
 
-    println!("Hotkey triggered!");
-    if let Ok(text) = state.clipboard.capture_selection() {
-        println!("Captured text: '{text}'");
-        if let Ok(parsed) = crate::parser::parse_input(&text) {
-            println!("Parsed value: {:.2}, unit: {:?}", parsed.value, parsed.unit);
+    let parsed_opt = state
+        .clipboard
+        .capture_selection()
+        .ok()
+        .and_then(|text| crate::parser::parse_input(&text).ok());
 
-            state.captured_value = parsed.value;
-            state.captured_unit.clone_from(&parsed.unit);
-            state.search_query = String::new();
-
-            // Try to convert immediately if unit is present
-            if let Some(ref unit) = parsed.unit {
-                if let Ok(result) = state.converter.convert(parsed.value, unit) {
-                    state.current_result = Some(result);
-                    log_conversion_if_enabled(state);
-                } else {
-                    state.current_result = None;
-                }
-            } else {
-                state.current_result = None;
-            }
-
-            let (x, y) = state.enigo.location().unwrap_or((100, 100));
-            println!("Opening window at {x}, {y}");
-
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "Screen coordinates fit in f32 mantissa"
-            )]
-            let settings = window::Settings {
-                size: (350.0, 400.0).into(),
-                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),        
-                decorations: false,
-                transparent: true,
-                level: window::Level::AlwaysOnTop,
-                platform_specific: iced::window::settings::PlatformSpecific {
-                    skip_taskbar: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            // If a window is already open, close it first
-            if let Some(id) = state.window_id {
-                return window::close::<Message>(id).then(move |_| {
-                    window::open(settings.clone()).1.map(Message::WindowOpened)
-                });
-            }
-            return window::open(settings).1.map(Message::WindowOpened);
+    if let Some(parsed) = parsed_opt {
+        state.captured_value = parsed.value;
+        if let Some(ref unit) = parsed.unit
+            && let Ok(result) = state.converter.convert(parsed.value, unit)
+        {
+            state.current_result = Some(result);
+            state.current_mode = WindowMode::Results;
+            log_conversion_if_enabled(state);
+        } else {
+            state.current_result = None;
+            state.current_mode = WindowMode::SourceUnitSelection;
         }
+    } else {
+        state.captured_value = 0.0;
+        state.current_result = None;
+        state.current_mode = WindowMode::ValueInput;
+        state.manual_input_value = String::new();
     }
-    state.is_opening_window = false;
-    Task::none()
+
+    state.search_query = String::new();
+    state.search_query_lower = String::new();
+
+    let (x, y) = state.enigo.location().unwrap_or((100, 100));
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Screen coordinates fit in f32 mantissa"
+    )]
+    let settings = window::Settings {
+        size: (350.0, 400.0).into(),
+        position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
+        decorations: false,
+        transparent: true,
+        level: window::Level::AlwaysOnTop,
+        platform_specific: iced::window::settings::PlatformSpecific {
+            skip_taskbar: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // If a window is already open, close it first
+    if let Some(id) = state.window_id {
+        return window::close::<Message>(id)
+            .then(move |_| window::open(settings.clone()).1.map(Message::WindowOpened));
+    }
+    window::open(settings).1.map(Message::WindowOpened)
 }
 
 #[allow(
@@ -404,11 +503,10 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
         return view_settings(state);
     }
 
-    let search_query_lower = state.search_query.to_lowercase();
-    let content = if let Some(result) = &state.current_result {
-        column![
+    let content = match state.current_mode {
+        WindowMode::ValueInput => column![
             row![
-                text(format!("{:.2} {}", result.input_value, result.input_unit))
+                text("Enter number to convert")
                     .size(24)
                     .color(Color::WHITE)
                     .width(Length::Fill),
@@ -418,125 +516,187 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                     .style(button::secondary)
             ]
             .align_y(Alignment::Center),
-            text_input("Search units...", &state.search_query)
-                .on_input(Message::SearchChanged)
+            text_input("e.g. 10.5", &state.manual_input_value)
+                .id(TextInputId::new("value_input"))
+                .on_input(Message::ManualInputValueChanged)
+                .on_submit(Message::SubmitManualInputValue)
                 .padding(10)
-                .size(16),
-            scrollable(
-                column(
-                    result
-                        .outputs
-                        .iter()
-                        .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
-                        .take(state.config.list_size)
-                        .map(|output| {
-                            let is_favorite = state.config.favorites.contains(&output.unit);       
-                            let favorite_label = if is_favorite { "★" } else { "☆" };
-
-                            container(
-                                row![
-                                    column![
-                                        text(format!("{:.4}", output.value))
-                                            .size(18)
-                                            .color(Color::WHITE),
-                                        text(&output.unit)
-                                            .size(14)
-                                            .color(Color::from_rgb8(150, 150, 150))
-                                    ]
-                                    .width(Length::Fill),
-                                    row![
-                                        button(text("⇌"))
-                                            .on_press(Message::Swap(
-                                                output.value,
-                                                output.unit.clone()
-                                            ))
-                                            .padding(5),
-                                        button(text(favorite_label))
-                                            .on_press(Message::ToggleFavorite(output.unit.clone()))
-                                            .padding(5)
-                                    ]
-                                    .spacing(5)
-                                ]
-                                .align_y(Alignment::Center),
-                            )
-                            .padding(10)
-                            .style(|_theme: &Theme| container::Style {
-                                border: iced::Border {
-                                    color: Color::from_rgba8(255, 255, 255, 0.1),
-                                    width: 1.0,
-                                    radius: 4.0.into(),
-                                },
-                                ..Default::default()
-                            })
-                            .into()
-                        })
-                )
-                .spacing(10)
-            )
+                .size(20),
         ]
         .spacing(15)
-        .align_x(Alignment::Start)
-    } else {
-        let all_units = state.converter.get_all_units().unwrap_or_default();
+        .align_x(Alignment::Start),
 
-        column![
-            row![
-                text(format!("Convert {:.4} ...", state.captured_value))
-                    .size(24)
-                    .color(Color::WHITE)
-                    .width(Length::Fill),
-                button(text("×").color(Color::WHITE))
-                    .padding(5)
-                    .on_press(Message::CloseWindow)
-                    .style(button::secondary)
-            ]
-            .align_y(Alignment::Center),
-            text_input("Search source unit...", &state.search_query)
-                .on_input(Message::SearchChanged)
-                .padding(10)
-                .size(16),
-            scrollable(
-                column(
-                    all_units
-                        .into_iter()
-                        .filter(|u| {
-                            u.symbol.to_lowercase().contains(&search_query_lower)
-                                || u.aliases.iter().any(|a| a.to_lowercase().contains(&search_query_lower))
-                        })
-                        .take(state.config.list_size)
-                        .map(|unit| {
-                            let aliases_str = if unit.aliases.is_empty() {
-                                String::new()
-                            } else {
-                                format!("({})", unit.aliases.join(", "))
-                            };
-
-                            button(
-                                column![
-                                    text(unit.symbol.clone()).color(Color::WHITE),
-                                    if unit.aliases.is_empty() {
-                                        Element::from(column![])
-                                    } else {
-                                        text(aliases_str)
-                                            .size(12)
-                                            .color(Color::from_rgb8(120, 120, 120))
-                                            .into()
-                                    }
-                                ]
-                                .spacing(2)
-                            )
-                            .on_press(Message::SelectSourceUnit(unit.symbol))
-                            .width(Length::Fill)
-                            .padding(10)
+        WindowMode::Results => {
+            if let Some(result) = &state.current_result {
+                column![
+                    row![
+                        button(
+                            text(format!("{:.2}", result.input_value))
+                                .size(24)
+                                .color(Color::WHITE)
+                        )
+                        .padding(2)
+                        .on_press(Message::EditValue)
+                        .style(button::text),
+                        text(" ").size(24).color(Color::WHITE),
+                        button(
+                            text(result.input_unit.clone())
+                                .size(24)
+                                .color(Color::WHITE)
+                        )
+                        .padding(2)
+                        .on_press(Message::EditSourceUnit)
+                        .style(button::text),
+                        Space::new().width(Length::Fill),
+                        button(text("×").color(Color::WHITE))
+                            .padding(5)
+                            .on_press(Message::CloseWindow)
                             .style(button::secondary)
-                            .into()
-                        })
+                    ]
+                    .align_y(Alignment::Center),
+                    text_input("Search units...", &state.search_query)
+                        .id(TextInputId::new("search_input"))
+                        .on_input(Message::SearchChanged)
+                        .on_submit(Message::SubmitSearch)
+                        .padding(10)
+                        .size(16),
+                    scrollable(
+                        column(
+                            result
+                                .outputs
+                                .iter()
+                                .filter(|o| o
+                                    .unit
+                                    .to_lowercase()
+                                    .contains(&state.search_query_lower))
+                                .take(state.config.list_size)
+                                .map(|output| {
+                                    let is_favorite = state.config.favorites.contains(&output.unit);
+                                    let favorite_label = if is_favorite { "★" } else { "☆" };
+
+                                    container(
+                                        row![
+                                            column![
+                                                text(format!("{:.4}", output.value))
+                                                    .size(18)
+                                                    .color(Color::WHITE),
+                                                text(&output.unit)
+                                                    .size(14)
+                                                    .color(Color::from_rgb8(150, 150, 150))
+                                            ]
+                                            .width(Length::Fill),
+                                            row![
+                                                button(text("⇌"))
+                                                    .on_press(Message::Swap(
+                                                        output.value,
+                                                        output.unit.clone()
+                                                    ))
+                                                    .padding(5),
+                                                button(text(favorite_label))
+                                                    .on_press(Message::ToggleFavorite(
+                                                        output.unit.clone()
+                                                    ))
+                                                    .padding(5)
+                                            ]
+                                            .spacing(5)
+                                        ]
+                                        .align_y(Alignment::Center),
+                                    )
+                                    .padding(10)
+                                    .style(|_theme: &Theme| container::Style {
+                                        border: iced::Border {
+                                            color: Color::from_rgba8(255, 255, 255, 0.1),
+                                            width: 1.0,
+                                            radius: 4.0.into(),
+                                        },
+                                        ..Default::default()
+                                    })
+                                    .into()
+                                })
+                        )
+                        .spacing(10)
+                    )
+                ]
+                .spacing(15)
+                .align_x(Alignment::Start)
+            } else {
+                column![text("No results").color(Color::WHITE)]
+            }
+        }
+
+        WindowMode::SourceUnitSelection => {
+            let all_units = state.converter.get_all_units().unwrap_or_default();
+
+            column![
+                row![
+                    text("Convert ").size(24).color(Color::WHITE),
+                    button(
+                        text(format!("{:.4}", state.captured_value))
+                            .size(24)
+                            .color(Color::WHITE)
+                    )
+                    .padding(2)
+                    .on_press(Message::EditValue)
+                    .style(button::text),
+                    text(" ...").size(24).color(Color::WHITE),
+                    Space::new().width(Length::Fill),
+                    button(text("×").color(Color::WHITE))
+                        .padding(5)
+                        .on_press(Message::CloseWindow)
+                        .style(button::secondary)
+                ]
+                .align_y(Alignment::Center),
+                text_input("Search source unit...", &state.search_query)
+                    .id(TextInputId::new("search_input"))
+                    .on_input(Message::SearchChanged)
+                    .on_submit(Message::SubmitSearch)
+                    .padding(10)
+                    .size(16),
+                scrollable(
+                    column(
+                        all_units
+                            .into_iter()
+                            .filter(|u| {
+                                u.symbol.to_lowercase().contains(&state.search_query_lower)
+                                    || u.aliases.iter().any(|a| {
+                                        a.to_lowercase().contains(&state.search_query_lower)
+                                    })
+                            })
+                            .take(state.config.list_size)
+                            .map(|unit| {
+                                let aliases_str = if unit.aliases.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("({})", unit.aliases.join(", "))
+                                };
+
+                                button(
+                                    column![
+                                        text(unit.symbol.clone()).color(Color::WHITE),
+                                        if unit.aliases.is_empty() {
+                                            Element::from(column![])
+                                        } else {
+                                            text(aliases_str)
+                                                .size(12)
+                                                .color(Color::from_rgb8(120, 120, 120))
+                                                .into()
+                                        }
+                                    ]
+                                    .spacing(2),
+                                )
+                                .on_press(Message::SelectSourceUnit(unit.symbol))
+                                .width(Length::Fill)
+                                .padding(10)
+                                .style(button::secondary)
+                                .into()
+                            })
+                    )
+                    .spacing(5)
                 )
-                .spacing(5)
-            )
-        ]
-        .spacing(15)
-        .align_x(Alignment::Start)
+            ]
+            .spacing(15)
+            .align_x(Alignment::Start)
+        }
     };
 
     container(content)
@@ -557,70 +717,76 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 
 pub fn subscription(_state: &State) -> Subscription<Message> {
     let hotkey_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        iced::stream::channel(
+            100,
+            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            std::thread::spawn(move || {
-                let receiver = GlobalHotKeyEvent::receiver();
-                while let Ok(event) = receiver.recv() {
-                    if tx.send(event).is_err() {
-                        break;
+                std::thread::spawn(move || {
+                    let receiver = GlobalHotKeyEvent::receiver();
+                    while let Ok(event) = receiver.recv() {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                while let Some(event) = rx.recv().await {
+                    if event.state == HotKeyState::Pressed {
+                        use iced::futures::SinkExt;
+                        let _ = output.send(Message::HotkeyTriggered).await;
                     }
                 }
-            });
-
-            while let Some(event) = rx.recv().await {
-                if event.state == HotKeyState::Pressed {
-                    use iced::futures::SinkExt;
-                    let _ = output.send(Message::HotkeyTriggered).await;
-                }
-            }
-        })
+            },
+        )
     });
 
-    let keyboard_sub =
-        iced::keyboard::listen().filter_map(|event| {
-            if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
-                return Some(Message::KeyPressed(key, modifiers));
-            }
-            None
-        });  
+    let keyboard_sub = iced::keyboard::listen().filter_map(|event| {
+        if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
+            return Some(Message::KeyPressed(key, modifiers));
+        }
+        None
+    });
 
     let tray_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        iced::stream::channel(
+            100,
+            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            std::thread::spawn(move || {
-                let receiver = MenuEvent::receiver();
-                while let Ok(event) = receiver.recv() {
-                    if tx.send(event).is_err() {
-                        break;
+                std::thread::spawn(move || {
+                    let receiver = MenuEvent::receiver();
+                    while let Ok(event) = receiver.recv() {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                while let Some(event) = rx.recv().await {
+                    use iced::futures::SinkExt;
+                    match event.id.0.as_str() {
+                        "quit" => {
+                            let _ = output.send(Message::ExitRequested).await;
+                        }
+                        "settings" => {
+                            let _ = output.send(Message::OpenSettings).await;
+                        }
+                        _ => {}
                     }
                 }
-            });
-
-            while let Some(event) = rx.recv().await {
-                use iced::futures::SinkExt;
-                match event.id.0.as_str() {
-                    "quit" => {
-                        let _ = output.send(Message::ExitRequested).await;
-                    }
-                    "settings" => {
-                        let _ = output.send(Message::OpenSettings).await;
-                    }
-                    _ => {}
-                }
-            }
-        })
+            },
+        )
     });
 
-    let blur_sub = iced::event::listen_with(|event, _status, id| match event {
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)), 
-        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),       
+    let window_event_sub = iced::event::listen_with(|event, _status, id| match event {
+        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
+        iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused(id)),
+        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
         _ => None,
     });
 
-    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, blur_sub])
+    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, window_event_sub])
 }
 
 fn format_hotkey(
@@ -674,7 +840,7 @@ fn format_hotkey(
     // Note: Iced's Named variant for modifiers are different,
     // but Character might catch some if something weird happens.
     // More importantly, we don't want to return just "Ctrl" as a hotkey usually,
-    // though global-hotkey might allow it. But our parser expects at least one non-modifier.      
+    // though global-hotkey might allow it. But our parser expects at least one non-modifier.
     if matches!(
         key_str.as_str(),
         "Ctrl" | "Alt" | "Shift" | "Meta" | "Control" | "Command" | "Win"
@@ -766,7 +932,7 @@ fn view_settings(state: &State) -> Element<'_, Message> {
             row![
                 column![
                     text("Fiat").size(12).color(Color::from_rgb8(150, 150, 150)),
-                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())        
+                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())
                         .on_input(Message::FiatIntervalChanged)
                         .padding(10),
                 ]

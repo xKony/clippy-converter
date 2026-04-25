@@ -70,7 +70,9 @@ impl Db {
             .context("Failed to initialize redb database")?;
 
         // Ensure tables are created
-        let write_txn = db.begin_write().context("Failed to begin init transaction")?;
+        let write_txn = db
+            .begin_write()
+            .context("Failed to begin init transaction")?;
         {
             let _ = write_txn
                 .open_table(UNITS_TABLE)
@@ -79,7 +81,9 @@ impl Db {
                 .open_table(ALIASES_TABLE)
                 .context("Failed to create aliases table")?;
         }
-        write_txn.commit().context("Failed to commit init transaction")?;
+        write_txn
+            .commit()
+            .context("Failed to commit init transaction")?;
 
         Ok(Self {
             inner: Arc::new(db),
@@ -154,31 +158,13 @@ impl Db {
         Ok(())
     }
 
-    /// Returns a list of all symbols stored in the database.
-    ///
-    /// # Errors
-    /// Returns an error if the read transaction fails or if iteration fails.
-    pub fn get_all_symbols(&self) -> Result<Vec<String>> {
-        let read_txn = self
-            .inner
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(UNITS_TABLE)
-            .context("Failed to open units table")?;
-        let mut symbols = Vec::new();
-        for result in table.iter().context("Failed to iterate table")? {
-            let (key, _) = result.context("Failed to read row")?;
-            symbols.push(key.value().to_string());
-        }
-        Ok(symbols)
-    }
-
     /// Returns all canonical symbols with their associated aliases.
     ///
     /// # Errors
     /// Returns an error if the read transaction or iteration fails.
-    pub fn get_all_units_with_aliases(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    pub fn get_all_units_with_aliases(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
         let read_txn = self
             .inner
             .begin_read()
@@ -345,7 +331,9 @@ impl Db {
             init_temperature_units(&mut units, &mut aliases)?;
             init_time_units(&mut units, &mut aliases)?;
         }
-        write_txn.commit().context("Failed to commit static units")?;
+        write_txn
+            .commit()
+            .context("Failed to commit static units")?;
         Ok(())
     }
 }
@@ -373,9 +361,7 @@ fn add_unit_static(
         )
         .context("Failed to insert static unit")?;
     for v in variations {
-        aliases
-            .insert(*v, sym)
-            .context("Failed to insert alias")?;
+        aliases.insert(*v, sym).context("Failed to insert alias")?;
         aliases
             .insert(v.to_lowercase().as_str(), sym)
             .context("Failed to insert lowercase alias")?;
@@ -466,9 +452,15 @@ fn init_weight_units(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
 ) -> Result<()> {
-    add_unit_static(units, aliases, "g", UnitCategory::Weight, 1.0, 0.0, &[
-        "gram", "grams", "gr",
-    ])?;
+    add_unit_static(
+        units,
+        aliases,
+        "g",
+        UnitCategory::Weight,
+        1.0,
+        0.0,
+        &["gram", "grams", "gr"],
+    )?;
     add_unit_static(
         units,
         aliases,
@@ -546,9 +538,15 @@ fn init_time_units(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
 ) -> Result<()> {
-    add_unit_static(units, aliases, "s", UnitCategory::Time, 1.0, 0.0, &[
-        "second", "seconds", "sec",
-    ])?;
+    add_unit_static(
+        units,
+        aliases,
+        "s",
+        UnitCategory::Time,
+        1.0,
+        0.0,
+        &["second", "seconds", "sec"],
+    )?;
     add_unit_static(
         units,
         aliases,
