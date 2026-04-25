@@ -622,7 +622,6 @@ dependencies = [
  "enigo",
  "global-hotkey",
  "iced",
- "once_cell",
  "open",
  "redb",
  "reqwest",

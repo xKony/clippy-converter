@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     println!("Clippy Converter starting...");
 
     let config = Config::load().unwrap_or_default();
-    
+
     let db = match Db::open() {
         Ok(db) => db,
         Err(e) => {
@@ -41,10 +41,19 @@ fn main() -> Result<()> {
     if let Err(e) = db.init_static_units() {
         eprintln!("Failed to initialize static units: {e}");
     }
-    
-    iced::daemon(move || ui::boot(ui::BootParams { config: config.clone(), db: db.clone() }), ui::update, ui::view)
-        .subscription(ui::subscription)
-        .run()?;
+
+    iced::daemon(
+        move || {
+            ui::boot(ui::BootParams {
+                config: config.clone(),
+                db: db.clone(),
+            })
+        },
+        ui::update,
+        ui::view,
+    )
+    .subscription(ui::subscription)
+    .run()?;
 
     Ok(())
 }

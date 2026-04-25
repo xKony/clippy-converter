@@ -6,7 +6,8 @@ use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, text, text_input, Id as TextInputId,
+    Id as TextInputId, button, checkbox, column, container, pick_list, row, scrollable, text,
+    text_input,
 };
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
@@ -25,11 +26,11 @@ pub struct State {
     pub hotkey_id: global_hotkey::hotkey::HotKey,
     pub current_result: Option<ConversionResult>,
     pub captured_value: f64,
-    pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
     pub settings_window_id: Option<window::Id>,
     pub is_opening_window: bool,
     pub search_query: String,
+    pub search_query_lower: String,
     pub tray_icon: TrayIcon,
     pub is_recording_hotkey: bool,
     pub recorded_hotkey: Option<String>,
@@ -57,7 +58,6 @@ pub enum Message {
     CryptoIntervalChanged(String),
     StartHotkeyRecording,
     CancelHotkeyRecording,
-    HotkeyRecorded(String),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     SaveConfig,
     ExitRequested,
@@ -68,12 +68,6 @@ pub enum Message {
 pub struct BootParams {
     pub config: Config,
     pub db: Db,
-}
-
-/// The title of the application.
-#[must_use]
-pub fn title() -> String {
-    String::from("Clippy Converter")
 }
 
 /// Initializes the application state.
@@ -90,13 +84,16 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
 
     // Infrastructure
     let clipboard = ClipboardManager::new().expect("Failed to initialize clipboard");
-    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");        
+    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");
 
     // Hotkeys
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager"); 
+    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager");
     let hk = hotkey::parse_hotkey(&config.hotkey).expect("Failed to parse hotkey");
     if let Err(e) = hotkey_manager.register(hk) {
-        eprintln!("Warning: Failed to register hotkey {}: {}", config.hotkey, e);
+        eprintln!(
+            "Warning: Failed to register hotkey {}: {}",
+            config.hotkey, e
+        );
     }
 
     // Tray Icon
@@ -123,11 +120,11 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
             hotkey_id: hk,
             current_result: None,
             captured_value: 0.0,
-            captured_unit: None,
             window_id: None,
             settings_window_id: None,
             is_opening_window: false,
             search_query: String::new(),
+            search_query_lower: String::new(),
             tray_icon,
             is_recording_hotkey: false,
             recorded_hotkey: None,
@@ -145,7 +142,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SpawnWorkers => {
             let db = state.db.clone();
             let config = state.config.clone();
-            tokio::spawn(crate::workers::start_fiat_worker(db.clone(), config.clone()));
+            tokio::spawn(crate::workers::start_fiat_worker(
+                db.clone(),
+                config.clone(),
+            ));
             tokio::spawn(crate::workers::start_crypto_worker(db, config));
             Task::none()
         }
@@ -185,13 +185,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             window::gain_focus(id)
         }
         Message::SearchChanged(query) => {
+            state.search_query_lower = query.to_lowercase();
             state.search_query = query;
             Task::none()
         }
         Message::SubmitSearch => {
             if state.current_result.is_none() {
-                let query_lower = state.search_query.to_lowercase();
-                if query_lower.is_empty() {
+                if state.search_query_lower.is_empty() {
                     return Task::none();
                 }
 
@@ -199,8 +199,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 // 1. Try to find exact match (case-insensitive)
                 let exact_match = all_units.iter().find(|u| {
-                    u.symbol.to_lowercase() == query_lower
-                        || u.aliases.iter().any(|a| a.to_lowercase() == query_lower)
+                    u.symbol.to_lowercase() == state.search_query_lower
+                        || u.aliases
+                            .iter()
+                            .any(|a| a.to_lowercase() == state.search_query_lower)
                 });
 
                 if let Some(unit) = exact_match {
@@ -209,10 +211,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 // 2. Fallback to first partial match
                 let partial_match = all_units.iter().find(|u| {
-                    u.symbol.to_lowercase().contains(&query_lower)
+                    u.symbol.to_lowercase().contains(&state.search_query_lower)
                         || u.aliases
                             .iter()
-                            .any(|a| a.to_lowercase().contains(&query_lower))
+                            .any(|a| a.to_lowercase().contains(&state.search_query_lower))
                 });
 
                 if let Some(unit) = partial_match {
@@ -224,8 +226,8 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SelectSourceUnit(unit) => {
             if let Ok(result) = state.converter.convert(state.captured_value, &unit) {
                 state.current_result = Some(result);
-                state.captured_unit = Some(unit);
                 state.search_query = String::new();
+                state.search_query_lower = String::new();
                 log_conversion_if_enabled(state);
                 iced::widget::operation::focus(TextInputId::new("search_input"))
             } else {
@@ -246,6 +248,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Ok(result) = state.converter.convert(value, &unit) {
                 state.current_result = Some(result);
                 state.search_query = String::new();
+                state.search_query_lower = String::new();
                 log_conversion_if_enabled(state);
                 iced::widget::operation::focus(TextInputId::new("search_input"))
             } else {
@@ -301,12 +304,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::CancelHotkeyRecording => {
             state.is_recording_hotkey = false;
             state.recorded_hotkey = None;
-            let _ = state.hotkey_manager.register(state.hotkey_id);
-            Task::none()
-        }
-        Message::HotkeyRecorded(val) => {
-            state.recorded_hotkey = Some(val);
-            state.is_recording_hotkey = false;
             let _ = state.hotkey_manager.register(state.hotkey_id);
             Task::none()
         }
@@ -391,8 +388,8 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             println!("Parsed value: {:.2}, unit: {:?}", parsed.value, parsed.unit);
 
             state.captured_value = parsed.value;
-            state.captured_unit.clone_from(&parsed.unit);
             state.search_query = String::new();
+            state.search_query_lower = String::new();
 
             // Try to convert immediately if unit is present
             if let Some(ref unit) = parsed.unit {
@@ -415,7 +412,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             )]
             let settings = window::Settings {
                 size: (350.0, 400.0).into(),
-                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),        
+                position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
                 decorations: false,
                 transparent: true,
                 level: window::Level::AlwaysOnTop,
@@ -428,9 +425,8 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
 
             // If a window is already open, close it first
             if let Some(id) = state.window_id {
-                return window::close::<Message>(id).then(move |_| {
-                    window::open(settings.clone()).1.map(Message::WindowOpened)
-                });
+                return window::close::<Message>(id)
+                    .then(move |_| window::open(settings.clone()).1.map(Message::WindowOpened));
             }
             return window::open(settings).1.map(Message::WindowOpened);
         }
@@ -453,7 +449,6 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
         return view_settings(state);
     }
 
-    let search_query_lower = state.search_query.to_lowercase();
     let content = if let Some(result) = &state.current_result {
         column![
             row![
@@ -478,10 +473,10 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                     result
                         .outputs
                         .iter()
-                        .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
+                        .filter(|o| o.unit.to_lowercase().contains(&state.search_query_lower))
                         .take(state.config.list_size)
                         .map(|output| {
-                            let is_favorite = state.config.favorites.contains(&output.unit);       
+                            let is_favorite = state.config.favorites.contains(&output.unit);
                             let favorite_label = if is_favorite { "★" } else { "☆" };
 
                             container(
@@ -553,8 +548,10 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                     all_units
                         .into_iter()
                         .filter(|u| {
-                            u.symbol.to_lowercase().contains(&search_query_lower)
-                                || u.aliases.iter().any(|a| a.to_lowercase().contains(&search_query_lower))
+                            u.symbol.to_lowercase().contains(&state.search_query_lower)
+                                || u.aliases
+                                    .iter()
+                                    .any(|a| a.to_lowercase().contains(&state.search_query_lower))
                         })
                         .take(state.config.list_size)
                         .map(|unit| {
@@ -576,7 +573,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                                             .into()
                                     }
                                 ]
-                                .spacing(2)
+                                .spacing(2),
                             )
                             .on_press(Message::SelectSourceUnit(unit.symbol))
                             .width(Length::Fill)
@@ -610,61 +607,66 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 
 pub fn subscription(_state: &State) -> Subscription<Message> {
     let hotkey_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        iced::stream::channel(
+            100,
+            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            std::thread::spawn(move || {
-                let receiver = GlobalHotKeyEvent::receiver();
-                while let Ok(event) = receiver.recv() {
-                    if tx.send(event).is_err() {
-                        break;
+                std::thread::spawn(move || {
+                    let receiver = GlobalHotKeyEvent::receiver();
+                    while let Ok(event) = receiver.recv() {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                while let Some(event) = rx.recv().await {
+                    if event.state == HotKeyState::Pressed {
+                        use iced::futures::SinkExt;
+                        let _ = output.send(Message::HotkeyTriggered).await;
                     }
                 }
-            });
-
-            while let Some(event) = rx.recv().await {
-                if event.state == HotKeyState::Pressed {
-                    use iced::futures::SinkExt;
-                    let _ = output.send(Message::HotkeyTriggered).await;
-                }
-            }
-        })
+            },
+        )
     });
 
-    let keyboard_sub =
-        iced::keyboard::listen().filter_map(|event| {
-            if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
-                return Some(Message::KeyPressed(key, modifiers));
-            }
-            None
-        });  
+    let keyboard_sub = iced::keyboard::listen().filter_map(|event| {
+        if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
+            return Some(Message::KeyPressed(key, modifiers));
+        }
+        None
+    });
 
     let tray_sub = Subscription::run(|| {
-        iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        iced::stream::channel(
+            100,
+            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            std::thread::spawn(move || {
-                let receiver = MenuEvent::receiver();
-                while let Ok(event) = receiver.recv() {
-                    if tx.send(event).is_err() {
-                        break;
+                std::thread::spawn(move || {
+                    let receiver = MenuEvent::receiver();
+                    while let Ok(event) = receiver.recv() {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                while let Some(event) = rx.recv().await {
+                    use iced::futures::SinkExt;
+                    match event.id.0.as_str() {
+                        "quit" => {
+                            let _ = output.send(Message::ExitRequested).await;
+                        }
+                        "settings" => {
+                            let _ = output.send(Message::OpenSettings).await;
+                        }
+                        _ => {}
                     }
                 }
-            });
-
-            while let Some(event) = rx.recv().await {
-                use iced::futures::SinkExt;
-                match event.id.0.as_str() {
-                    "quit" => {
-                        let _ = output.send(Message::ExitRequested).await;
-                    }
-                    "settings" => {
-                        let _ = output.send(Message::OpenSettings).await;
-                    }
-                    _ => {}
-                }
-            }
-        })
+            },
+        )
     });
 
     let window_event_sub = iced::event::listen_with(|event, _status, id| match event {
@@ -674,7 +676,8 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         _ => None,
     });
 
-    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, window_event_sub])}
+    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, window_event_sub])
+}
 
 fn format_hotkey(
     key: &iced::keyboard::Key,
@@ -727,7 +730,7 @@ fn format_hotkey(
     // Note: Iced's Named variant for modifiers are different,
     // but Character might catch some if something weird happens.
     // More importantly, we don't want to return just "Ctrl" as a hotkey usually,
-    // though global-hotkey might allow it. But our parser expects at least one non-modifier.      
+    // though global-hotkey might allow it. But our parser expects at least one non-modifier.
     if matches!(
         key_str.as_str(),
         "Ctrl" | "Alt" | "Shift" | "Meta" | "Control" | "Command" | "Win"
@@ -819,7 +822,7 @@ fn view_settings(state: &State) -> Element<'_, Message> {
             row![
                 column![
                     text("Fiat").size(12).color(Color::from_rgb8(150, 150, 150)),
-                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())        
+                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())
                         .on_input(Message::FiatIntervalChanged)
                         .padding(10),
                 ]

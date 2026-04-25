@@ -39,7 +39,9 @@ impl Converter {
         // Resolve "kilometers" to "km"
         let from_unit = self.db.resolve_symbol(from_input)?;
 
-        let entry = self.db.get_unit(&from_unit)?
+        let entry = self
+            .db
+            .get_unit(&from_unit)?
             .ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
 
         // Math: Base = (Input + Offset) * Factor
@@ -117,13 +119,21 @@ mod tests {
         let config = Config::default();
         let db = create_test_db();
         // EUR is base (factor 1.0, offset 0.0)
-        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
-        // USD (e.g. 1.1 USD per 1 EUR) -> factor = 1/1.1 ? 
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        // USD (e.g. 1.1 USD per 1 EUR) -> factor = 1/1.1 ?
         // Wait, if Base = (Value + Offset) * Factor, and Base is EUR.
         // For USD: Base_EUR = (Value_USD + 0) * (1/1.1)
         // So factor = 1.0 / 1.1
-        db.update_unit("USD", 1.0 / 1.1, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
-        
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+
         let converter = Converter::new(config, db);
 
         let res = converter.convert(10.0, "EUR").unwrap();
@@ -166,16 +176,18 @@ mod tests {
     fn test_cross_currency_conversion() {
         let config = Config::default();
         let db = create_test_db();
-        
+
         // 1. EUR is base
-        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
-        
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+
         // 2. PLN (Fiat): 1 EUR = 4.0 PLN -> Factor = 1/4 = 0.25
         db.update_rate("PLN", 4.0, 1000, RateSource::Fiat).unwrap();
-        
+
         // 3. BTC (Crypto): 1 BTC = 50000 EUR -> Factor = 50000
-        db.update_rate("BTC", 50000.0, 1000, RateSource::Crypto).unwrap();
-        
+        db.update_rate("BTC", 50000.0, 1000, RateSource::Crypto)
+            .unwrap();
+
         let converter = Converter::new(config, db);
 
         // Convert 1 BTC to PLN

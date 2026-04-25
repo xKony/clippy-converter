@@ -42,9 +42,7 @@ async fn update_fiat_rates(db: &Db) -> Result<()> {
 async fn update_crypto_rates(db: &Db) -> Result<()> {
     // 1. Get the conversion factor for USDT to EUR (EUR per 1 USDT)
     // We prefer the normalized factor from UNITS_TABLE which is always "EUR per Unit".
-    let usdt_factor = db
-        .get_unit("USDT")?
-        .map_or(0.92, |entry| entry.factor);
+    let usdt_factor = db.get_unit("USDT")?.map_or(0.92, |entry| entry.factor);
 
     let tickers = fetch_binance_tickers()
         .await
