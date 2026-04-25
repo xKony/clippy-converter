@@ -6,7 +6,7 @@ use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
-    Id as TextInputId, button, checkbox, column, container, pick_list, row, scrollable, text,
+    Id as TextInputId, Space, button, checkbox, column, container, pick_list, row, scrollable, text,
     text_input,
 };
 use iced::window;
@@ -57,6 +57,8 @@ pub enum Message {
     SubmitSearch,
     ManualInputValueChanged(String),
     SubmitManualInputValue,
+    EditValue,
+    EditSourceUnit,
     SelectSourceUnit(String),
     ToggleFavorite(String),
     Swap(f64, String),
@@ -213,7 +215,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::SubmitSearch => {
-            if state.current_result.is_none() {
+            if state.current_mode == WindowMode::SourceUnitSelection {
                 if state.search_query_lower.is_empty() {
                     return Task::none();
                 }
@@ -260,6 +262,17 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
+        }
+        Message::EditValue => {
+            state.current_mode = WindowMode::ValueInput;
+            state.manual_input_value = state.captured_value.to_string();
+            iced::widget::operation::focus(TextInputId::new("value_input"))
+        }
+        Message::EditSourceUnit => {
+            state.current_mode = WindowMode::SourceUnitSelection;
+            state.search_query = String::new();
+            state.search_query_lower = String::new();
+            iced::widget::operation::focus(TextInputId::new("search_input"))
         }
         Message::SelectSourceUnit(unit) => {
             if let Ok(result) = state.converter.convert(state.captured_value, &unit) {
@@ -517,10 +530,24 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
             if let Some(result) = &state.current_result {
                 column![
                     row![
-                        text(format!("{:.2} {}", result.input_value, result.input_unit))
-                            .size(24)
-                            .color(Color::WHITE)
-                            .width(Length::Fill),
+                        button(
+                            text(format!("{:.2}", result.input_value))
+                                .size(24)
+                                .color(Color::WHITE)
+                        )
+                        .padding(2)
+                        .on_press(Message::EditValue)
+                        .style(button::text),
+                        text(" ").size(24).color(Color::WHITE),
+                        button(
+                            text(result.input_unit.clone())
+                                .size(24)
+                                .color(Color::WHITE)
+                        )
+                        .padding(2)
+                        .on_press(Message::EditSourceUnit)
+                        .style(button::text),
+                        Space::new().width(Length::Fill),
                         button(text("×").color(Color::WHITE))
                             .padding(5)
                             .on_press(Message::CloseWindow)
@@ -602,10 +629,17 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 
             column![
                 row![
-                    text(format!("Convert {:.4} ...", state.captured_value))
-                        .size(24)
-                        .color(Color::WHITE)
-                        .width(Length::Fill),
+                    text("Convert ").size(24).color(Color::WHITE),
+                    button(
+                        text(format!("{:.4}", state.captured_value))
+                            .size(24)
+                            .color(Color::WHITE)
+                    )
+                    .padding(2)
+                    .on_press(Message::EditValue)
+                    .style(button::text),
+                    text(" ...").size(24).color(Color::WHITE),
+                    Space::new().width(Length::Fill),
                     button(text("×").color(Color::WHITE))
                         .padding(5)
                         .on_press(Message::CloseWindow)

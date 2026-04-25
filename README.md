@@ -4,131 +4,105 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 
-A lightweight, ultra-fast background application designed for seamless unit and currency conversion. Highlight a value, press a global hotkey, and instantly see conversion results in a minimalist floating UI right at your cursor.
+A lightweight, background unit and currency converter with global hotkeys and local caching. It captures selected text via a system-wide hotkey, parses numerical values and units, and displays a floating, transparent UI at the mouse cursor coordinates for instant conversion.
 
 ## ✨ Features
 
-- **Global Hotkey Trigger**: Intercepts text selection via programmatic copy using a system-wide shortcut (Default: `Shift+Alt+C`).
-- **Floating UI Overlay**: Minimalist, borderless window that appears instantly at the mouse cursor.
-- **Smart Parsing**: Auto-detects numbers and units from captured text, including support for leading currency symbols (e.g., `$50`, `€ 120.50`).
-- **Extensible Conversions**:
-    - **Currencies**: 200+ fiat currencies and cryptocurrencies with rates updated in the background.
-    - **Physical Units**: Length (m, ft, in, etc.), Weight (kg, lb, oz, etc.), and Temperature (C, F, K).
-- **Local Caching**: Uses a local database (`redb`) to store exchange rates, ensuring offline availability and blazing-fast response times.
-- **Background Workers**: Automated tasks to refresh fiat and crypto rates at configurable intervals.
-- **Favorites & Sorting**: Quick access to your most-used units; favorites are pinned to the top of the results.
-- **Conversion History**: Optional logging of conversions with configurable retention periods.
-- **Tray Integration**: Minimal footprint with a system tray icon for quick access to settings and application exit.
-- **Single Instance**: Built-in protection to ensure only one instance of the application runs at a time.
-
-[↑ Back to top](#)
+- **Global Hotkey Trigger**: Captures highlighted text via simulated clipboard copying using a configurable system-wide shortcut (default: `Shift+Alt+C`).
+- **Floating UI Overlay**: Displays a borderless, transparent, always-on-top window at the exact mouse cursor coordinates.
+- **Smart Parsing**: Automatically splits captured strings into numerical values and their accompanying unit or currency symbols.
+- **Offline-First Conversions**: Uses a local `redb` database to cache exchange rates and store static unit conversions (length, weight, temperature).
+- **Background API Workers**: Automatically fetches and updates fiat currency rates from Fawaz Ahmed's API (daily) and crypto prices from Binance (hourly).
+- **Favorites & Sorting**: Allows pinning favorite units to the top of the conversion list for quick access.
+- **Conversion History**: Logs past conversions to a local file with configurable retention periods (e.g., 7 days, 30 days, 1 year).
+- **System Tray Integration**: Runs silently in the background with a tray icon menu to open settings or exit.
+- **Single Instance Lock**: Built-in protection to ensure only one instance runs at a time, preventing database locks.
 
 ## 🛠 Tech Stack
 
-- **Language**: Rust (Edition 2024)
-- **GUI**: [Iced](https://iced.rs/) (v0.14.0) with tokio integration
-- **Database**: [redb](https://www.redb.org/) (v4.1.0) for high-performance local storage
-- **Hotkeys**: `global-hotkey` (v0.7.0)
-- **Clipboard**: `arboard` (v3.4)
-- **Networking**: `reqwest` (v0.13.2)
-- **Serialization**: `serde` & `serde_json` (v1.0)
-- **Automation**: `enigo` (v0.6.1) for selection capture
-- **Runtime**: `tokio` (v1)
+**Language & Framework**
+- Rust (Edition 2024)
+- `iced` (0.14.0) - GUI framework
+- `tokio` (1) - Asynchronous runtime
 
-[↑ Back to top](#)
+**Database & Storage**
+- `redb` (4.1.0) - Embedded key-value database
+- `bincode` (1.3.3) - Binary serialization
+- `directories` (6.0) - OS-specific directory resolution
 
-## 🌐 Data Sources & APIs
+**System Integration**
+- `global-hotkey` (0.7.0) - System-wide shortcut listener
+- `arboard` (3.4) - Clipboard access
+- `enigo` (0.6.1) - Keystroke simulation (Ctrl+C)
+- `tray-icon` (0.19) - System tray integration
+- `single-instance` (0.3.3) - Single instance lock
+- `open` (5.3) - Opening paths in system explorer
 
-Clippy Converter relies on high-quality, real-time and daily-updated data sources to provide accurate conversions:
+**Networking & Data Processing**
+- `reqwest` (0.13.2) - HTTP client
+- `serde` (1.0) - Serialization/Deserialization
+- `serde_json` (1.0) - JSON parsing
+- `chrono` (0.4) - Date and time handling
 
-- **Fiat Currency Rates**: Powered by the [Currency API by Fawaz Ahmed](https://github.com/fawazahmed0/currency-api). 
-    - Supports 200+ currencies.
-    - Provides daily updated exchange rates via a blazing-fast CDN.
-    - Credited via `currency-exchange-rates-api.md`.
-- **Cryptocurrency Prices**: Real-time ticker data is fetched from the [Binance API](https://binance-docs.github.io/apidocs/spot/en/#symbol-price-ticker).
-    - Ensures high-accuracy prices for major crypto pairs (e.g., BTC, ETH, SOL).
-    - Updated at configurable intervals (default: 1 minute).
-
-[↑ Back to top](#)
-
-## 🤖 AI-Driven Development
-
-Clippy Converter is a showcase of modern software engineering through **Autonomous Agentic Workflows**. 
-
-- **Architected by Human**: The core logic, architectural decisions, and problem-solving strategies were directed by the human architect.
-- **Implemented by AI Agents**: 100% of the codebase, tests, and documentation were generated by autonomous coding agents (including this README).
-- **Agentic Workflow**: The project utilized specialized sub-agents for codebase investigation, systematic debugging, and implementation planning, following a strict Research -> Strategy -> Execution lifecycle.
-
-This project demonstrates the power of human-AI collaboration, where the human provides the "why" and the high-level "how," while the agentic system handles the "what" with precision and speed.
-
-[↑ Back to top](#)
+**Testing**
+- `tempfile` (3.10) - Temporary files for unit tests
 
 ## 📁 Project Structure
 
 ```text
-clippy-converter/
+.
 ├── src/
-│   ├── main.rs          # Entry point, initialization, and single instance lock
-│   ├── ui.rs            # Iced GUI implementation, window management, and messaging
-│   ├── converter.rs     # Core conversion engine for physical units and currencies
-│   ├── parser.rs        # Input string parsing logic for numbers and symbols
-│   ├── db.rs            # Persistence layer using redb for exchange rates
-│   ├── api.rs           # External API integration for currency rates
-│   ├── models.rs        # Shared data structures and configuration logic
-│   ├── clipboard.rs     # Clipboard capture and restoration manager
-│   ├── hotkey.rs        # Hotkey parsing and registration utilities
-│   ├── workers.rs       # Background update tasks for fiat/crypto rates
-│   └── history.rs       # Conversion logging and retention management
-├── Cargo.toml           # Project dependencies and strict lint configuration
-└── project-whitepaper.md # Detailed project vision and architecture
+│   ├── api.rs           # External HTTP requests to Binance and fiat currency APIs
+│   ├── clipboard.rs     # Clipboard capture via Enigo (Ctrl+C) and Arboard
+│   ├── converter.rs     # Core engine for calculating unit and currency conversions
+│   ├── db.rs            # Thread-safe wrapper for redb embedded database
+│   ├── history.rs       # Local logging and retention of past conversions
+│   ├── hotkey.rs        # Parsing human-readable hotkeys into system structures
+│   ├── main.rs          # Application entry point, single instance lock, and Iced daemon setup
+│   ├── models.rs        # Core data structures and local JSON configuration logic
+│   ├── parser.rs        # String splitting and value extraction logic
+│   ├── ui.rs            # Iced UI state machine, floating window, and tray menu
+│   └── workers.rs       # Async tokio tasks for periodic background data refreshes
+├── Cargo.toml           # Project dependencies, metadata, and strict linting rules
+├── README.md            # Project documentation
+└── project-whitepaper.md # Original architectural and UX vision
 ```
-
-[↑ Back to top](#)
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
-- **Rust**: Latest stable version (Edition 2024 support required).
-- **OS**: Windows (tested), Linux/macOS support depends on `iced` and `global-hotkey` compatibility.
+- **Rust**: Edition 2024 (install via `rustup`)
+- **OS Compatibility**: Windows (tested natively). Requires OS-level support for global hotkeys, clipboard access, and transparent windows.
 
 ### Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/xKony/clippy-converter.git
-   cd clippy-converter
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/xKony/clippy-converter.git
+cd clippy-converter
 
-2. Build and run in release mode:
-   ```bash
-   cargo run --release
-   ```
+# Build and run the application in development mode
+cargo run
+
+# Or build the optimized production binary
+cargo build --release
+```
 
 ### Configuration
 
-The application stores its configuration in the standard user config directory (e.g., `%AppData%\clippy\clippy-converter\config.json` on Windows).
-
-- **Hotkey**: Change the trigger shortcut in Settings (Default: `Shift+Alt+C`).
-- **Update Intervals**: Configure how often fiat and crypto rates should refresh.
-- **Favorites**: Toggle the "star" icon next to any unit to pin it.
-
-[↑ Back to top](#)
+The application creates a `config.json` file in the user's default configuration directory (e.g., `AppData/Roaming/com/clippy/clippy-converter/config.json` on Windows).
+No environment variables (`.env`) are required.
 
 ## 📖 Usage
 
-1. Start the application. It will minimize to the system tray.
-2. Highlight any text containing a value (e.g., `100 USD`, `5.5 kg`, or just `20`).
-3. Press `Shift+Alt+C`.
-4. A window will appear at your cursor with conversion results.
-5. Use the **Search bar** to find specific target units.
-6. Click the **Swap (⇌)** button to reverse the conversion.
-7. Click the **Favorite (★)** button to save a unit for quick access.
-
-[↑ Back to top](#)
+1. Start the application. It will run in the background and appear in your system tray.
+2. Highlight a value and unit anywhere on your computer (e.g., `100 EUR`, `50 kg`, or `1.5 BTC`).
+3. Press the global hotkey (`Shift+Alt+C` by default).
+4. A floating window will appear at your mouse cursor displaying the conversion results.
+5. Use the search bar to filter target units, click the star icon to favorite a unit, or click the swap icon to reverse the conversion.
+6. Right-click the system tray icon to access Settings or Quit the application.
 
 ## 📄 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
-
-[↑ Back to top](#)
+MIT
