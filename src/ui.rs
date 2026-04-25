@@ -4,13 +4,12 @@ use crate::db::Db;
 use crate::hotkey;
 use crate::models::{Config, ConversionResult, HistoryRetention};
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use iced::widget::{
     button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
 };
 use iced::window;
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
-use std::time::Duration;
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -29,6 +28,7 @@ pub struct State {
     pub captured_unit: Option<String>,
     pub window_id: Option<window::Id>,
     pub settings_window_id: Option<window::Id>,
+    pub is_opening_window: bool,
     pub search_query: String,
     pub tray_icon: TrayIcon,
     pub is_recording_hotkey: bool,
@@ -124,6 +124,7 @@ pub fn boot(params: BootParams) -> (State, Task<Message>) {
             captured_unit: None,
             window_id: None,
             settings_window_id: None,
+            is_opening_window: false,
             search_query: String::new(),
             tray_icon,
             is_recording_hotkey: false,
@@ -149,6 +150,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::HotkeyTriggered => handle_hotkey(state),
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
+            state.is_opening_window = false;
             Task::none()
         }
         Message::WindowClosed(id) => {
@@ -328,6 +330,11 @@ fn log_conversion_if_enabled(state: &State) {
 }
 
 fn handle_hotkey(state: &mut State) -> Task<Message> {
+    if state.is_opening_window {
+        return Task::none();
+    }
+    state.is_opening_window = true;
+
     println!("Hotkey triggered!");
     if let Ok(text) = state.clipboard.capture_selection() {
         println!("Captured text: '{text}'");
@@ -379,6 +386,7 @@ fn handle_hotkey(state: &mut State) -> Task<Message> {
             return window::open(settings).1.map(Message::WindowOpened);
         }
     }
+    state.is_opening_window = false;
     Task::none()
 }
 
@@ -420,6 +428,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                         .outputs
                         .iter()
                         .filter(|o| o.unit.to_lowercase().contains(&search_query_lower))
+                        .take(state.config.list_size)
                         .map(|output| {
                             let is_favorite = state.config.favorites.contains(&output.unit);       
                             let favorite_label = if is_favorite { "★" } else { "☆" };
@@ -468,7 +477,7 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
         .spacing(15)
         .align_x(Alignment::Start)
     } else {
-        let all_units = state.converter.get_all_units();
+        let all_units = state.converter.get_all_units().unwrap_or_default();
 
         column![
             row![
@@ -490,14 +499,37 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
                 column(
                     all_units
                         .into_iter()
-                        .filter(|u| u.to_lowercase().contains(&search_query_lower))
+                        .filter(|u| {
+                            u.symbol.to_lowercase().contains(&search_query_lower)
+                                || u.aliases.iter().any(|a| a.to_lowercase().contains(&search_query_lower))
+                        })
+                        .take(state.config.list_size)
                         .map(|unit| {
-                            button(text(unit.clone()).color(Color::WHITE))
-                                .on_press(Message::SelectSourceUnit(unit))
-                                .width(Length::Fill)
-                                .padding(10)
-                                .style(button::secondary)
-                                .into()
+                            let aliases_str = if unit.aliases.is_empty() {
+                                String::new()
+                            } else {
+                                format!("({})", unit.aliases.join(", "))
+                            };
+
+                            button(
+                                column![
+                                    text(unit.symbol.clone()).color(Color::WHITE),
+                                    if unit.aliases.is_empty() {
+                                        Element::from(column![])
+                                    } else {
+                                        text(aliases_str)
+                                            .size(12)
+                                            .color(Color::from_rgb8(120, 120, 120))
+                                            .into()
+                                    }
+                                ]
+                                .spacing(2)
+                            )
+                            .on_press(Message::SelectSourceUnit(unit.symbol))
+                            .width(Length::Fill)
+                            .padding(10)
+                            .style(button::secondary)
+                            .into()
                         })
                 )
                 .spacing(5)
@@ -526,13 +558,22 @@ pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
 pub fn subscription(_state: &State) -> Subscription<Message> {
     let hotkey_sub = Subscription::run(|| {
         iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let receiver = GlobalHotKeyEvent::receiver();
-            loop {
-                if let Ok(_event) = receiver.try_recv() {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            std::thread::spawn(move || {
+                let receiver = GlobalHotKeyEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            while let Some(event) = rx.recv().await {
+                if event.state == HotKeyState::Pressed {
                     use iced::futures::SinkExt;
                     let _ = output.send(Message::HotkeyTriggered).await;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
     });
@@ -547,21 +588,28 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
 
     let tray_sub = Subscription::run(|| {
         iced::stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let receiver = MenuEvent::receiver();
-            loop {
-                if let Ok(event) = receiver.try_recv() {
-                    use iced::futures::SinkExt;
-                    match event.id.0.as_str() {
-                        "quit" => {
-                            let _ = output.send(Message::ExitRequested).await;
-                        }
-                        "settings" => {
-                            let _ = output.send(Message::OpenSettings).await;
-                        }
-                        _ => {}
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            std::thread::spawn(move || {
+                let receiver = MenuEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    if tx.send(event).is_err() {
+                        break;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            });
+
+            while let Some(event) = rx.recv().await {
+                use iced::futures::SinkExt;
+                match event.id.0.as_str() {
+                    "quit" => {
+                        let _ = output.send(Message::ExitRequested).await;
+                    }
+                    "settings" => {
+                        let _ = output.send(Message::OpenSettings).await;
+                    }
+                    _ => {}
+                }
             }
         })
     });

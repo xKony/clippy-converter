@@ -52,6 +52,13 @@ impl ClipboardManager {
         #[cfg(not(target_os = "macos"))]
         let modifier = Key::Control;
 
+        // Release physical modifiers that might be held down by the user
+        // to avoid combinations like Ctrl+Shift+Alt+C
+        let _ = self.enigo.key(Key::Shift, Direction::Release);
+        let _ = self.enigo.key(Key::Alt, Direction::Release);
+        let _ = self.enigo.key(Key::Control, Direction::Release);
+        let _ = self.enigo.key(Key::Meta, Direction::Release);
+
         self.enigo
             .key(modifier, Direction::Press)
             .context("Failed to press modifier key")?;
@@ -73,7 +80,7 @@ impl ClipboardManager {
                 captured_text = text;
                 break;
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(2));
         }
 
         // 5. Restore original content if it existed
