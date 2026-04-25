@@ -42,11 +42,11 @@ impl Converter {
         // 1. Check for currency multipliers (e.g., "B USD")
         if let Some((factor, rest)) = extract_currency_multiplier(from_input) {
             let resolved_rest = self.db.resolve_symbol(rest)?;
-            if let Ok(Some(entry)) = self.db.get_unit(&resolved_rest) {
-                if entry.category == crate::models::UnitCategory::Currency as u8 {
-                    actual_value *= factor;
-                    parsed_unit = rest;
-                }
+            if let Ok(Some(entry)) = self.db.get_unit(&resolved_rest)
+                && entry.category == crate::models::UnitCategory::Currency as u8
+            {
+                actual_value *= factor;
+                parsed_unit = rest;
             }
         }
 
@@ -56,19 +56,18 @@ impl Converter {
         let mut entry_opt = self.db.get_unit(&from_unit)?;
 
         // 2. Metric prefix fallback
-        if entry_opt.is_none() {
-            if let Some((factor, rest)) = extract_metric_prefix(parsed_unit) {
-                let resolved_rest = self.db.resolve_symbol(rest)?;
-                if let Ok(Some(rest_entry)) = self.db.get_unit(&resolved_rest) {
-                    if rest_entry.category != crate::models::UnitCategory::Currency as u8 {
-                        actual_value *= factor;
-                        from_unit = resolved_rest;
-                        entry_opt = Some(rest_entry);
-                    }
-                }
+        if entry_opt.is_none()
+            && let Some((factor, rest)) = extract_metric_prefix(parsed_unit)
+        {
+            let resolved_rest = self.db.resolve_symbol(rest)?;
+            if let Ok(Some(rest_entry)) = self.db.get_unit(&resolved_rest)
+                && rest_entry.category != crate::models::UnitCategory::Currency as u8
+            {
+                actual_value *= factor;
+                from_unit = resolved_rest;
+                entry_opt = Some(rest_entry);
             }
         }
-
         let entry = entry_opt.ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
 
         // Math: Base = (Input + Offset) * Factor

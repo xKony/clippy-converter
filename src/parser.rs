@@ -87,21 +87,16 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
             // Peek ahead to see if more digits, a decimal, or scientific notation follows
             let remaining = &input[i + 1..];
             let mut is_part_of_number = false;
-            let mut temp_decimal = found_decimal;
-            let mut temp_e = found_e;
-            let mut temp_last_e = last_char_was_e;
+            let temp_decimal = found_decimal;
+            let temp_e = found_e;
+            let temp_last_e = last_char_was_e;
 
             for nc in remaining.chars() {
-                if nc.is_ascii_digit() {
-                    is_part_of_number = true;
-                    break;
-                } else if nc == '.' && !temp_decimal && !temp_e {
-                    is_part_of_number = true;
-                    break;
-                } else if (nc == 'e' || nc == 'E') && !temp_e {
-                    is_part_of_number = true;
-                    break;
-                } else if (nc == '+' || nc == '-') && temp_last_e {
+                if nc.is_ascii_digit()
+                    || (nc == '.' && !temp_decimal && !temp_e)
+                    || ((nc == 'e' || nc == 'E') && !temp_e)
+                    || ((nc == '+' || nc == '-') && temp_last_e)
+                {
                     is_part_of_number = true;
                     break;
                 } else if !nc.is_whitespace() {
