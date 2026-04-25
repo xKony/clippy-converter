@@ -41,6 +41,7 @@ pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     WindowUnfocused(window::Id),
+    WindowFocused(window::Id),
     SettingsWindowOpened(window::Id),
     SearchChanged(String),
     SelectSourceUnit(String),
@@ -151,7 +152,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::WindowOpened(id) => {
             state.window_id = Some(id);
             state.is_opening_window = false;
-            iced::widget::operation::focus(TextInputId::new("search_input"))
+            Task::batch([
+                window::gain_focus(id),
+                iced::widget::operation::focus(TextInputId::new("search_input")),
+            ])
         }
         Message::WindowClosed(id) => {
             if state.window_id == Some(id) {
@@ -168,9 +172,16 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::WindowFocused(id) => {
+            if state.window_id == Some(id) {
+                iced::widget::operation::focus(TextInputId::new("search_input"))
+            } else {
+                Task::none()
+            }
+        }
         Message::SettingsWindowOpened(id) => {
             state.settings_window_id = Some(id);
-            Task::none()
+            window::gain_focus(id)
         }
         Message::SearchChanged(query) => {
             state.search_query = query;
@@ -616,14 +627,14 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
         })
     });
 
-    let blur_sub = iced::event::listen_with(|event, _status, id| match event {
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)), 
-        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),       
+    let window_event_sub = iced::event::listen_with(|event, _status, id| match event {
+        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
+        iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused(id)),
+        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
         _ => None,
     });
 
-    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, blur_sub])
-}
+    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, window_event_sub])}
 
 fn format_hotkey(
     key: &iced::keyboard::Key,
