@@ -3,40 +3,16 @@ use crate::converter::Converter;
 use crate::db::Db;
 use crate::hotkey;
 use crate::models::{Config, ConversionResult, HistoryRetention};
+use anyhow::{Context, Result};
+use eframe::egui;
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use iced::widget::{
-    Id as TextInputId, Space, button, checkbox, column, container, pick_list, row, scrollable, text,
-    text_input,
-};
-use iced::window;
-use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
 };
-
-pub struct State {
-    pub config: Config,
-    pub db: Db,
-    pub converter: Converter,
-    pub clipboard: ClipboardManager,
-    pub enigo: Enigo,
-    pub hotkey_manager: GlobalHotKeyManager,
-    pub hotkey_id: global_hotkey::hotkey::HotKey,
-    pub current_result: Option<ConversionResult>,
-    pub captured_value: f64,
-    pub window_id: Option<window::Id>,
-    pub settings_window_id: Option<window::Id>,
-    pub is_opening_window: bool,
-    pub search_query: String,
-    pub search_query_lower: String,
-    pub tray_icon: TrayIcon,
-    pub is_recording_hotkey: bool,
-    pub recorded_hotkey: Option<String>,
-    pub current_mode: WindowMode,
-    pub manual_input_value: String,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMode {
@@ -45,811 +21,10 @@ pub enum WindowMode {
     Results,
 }
 
-#[derive(Debug, Clone)]
-pub enum Message {
+pub enum EventMsg {
     HotkeyTriggered,
-    WindowOpened(window::Id),
-    WindowClosed(window::Id),
-    WindowUnfocused(window::Id),
-    WindowFocused(window::Id),
-    SettingsWindowOpened(window::Id),
-    SearchChanged(String),
-    SubmitSearch,
-    ManualInputValueChanged(String),
-    SubmitManualInputValue,
-    EditValue,
-    EditSourceUnit,
-    SelectSourceUnit(String),
-    ToggleFavorite(String),
-    Swap(f64, String),
-    CloseWindow,
     OpenSettings,
-    ToggleHistory(bool),
-    HistoryRetentionChanged(HistoryRetention),
-    OpenHistoryFolder,
-    FiatIntervalChanged(String),
-    CryptoIntervalChanged(String),
-    StartHotkeyRecording,
-    CancelHotkeyRecording,
-    KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
-    SaveConfig,
-    ExitRequested,
-    SpawnWorkers,
-}
-
-/// Parameters for booting the UI.
-pub struct BootParams {
-    pub config: Config,
-    pub db: Db,
-}
-
-/// Initializes the application state.
-///
-/// # Panics
-/// Panics if the clipboard, mouse controller, hotkey manager, or tray icon fails to initialize.   
-#[expect(
-    clippy::expect_used,
-    reason = "Critical infrastructure failure at startup is non-recoverable"
-)]
-pub fn boot(params: BootParams) -> (State, Task<Message>) {
-    let BootParams { config, db } = params;
-    let converter = Converter::new(config.clone(), db.clone());
-
-    // Infrastructure
-    let clipboard = ClipboardManager::new().expect("Failed to initialize clipboard");
-    let enigo = Enigo::new(&EnigoSettings::default()).expect("Failed to initialize enigo");
-
-    // Hotkeys
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize hotkey manager");
-    let hk = hotkey::parse_hotkey(&config.hotkey).expect("Failed to parse hotkey");
-    if let Err(e) = hotkey_manager.register(hk) {
-        eprintln!(
-            "Warning: Failed to register hotkey {}: {}",
-            config.hotkey, e
-        );
-    }
-
-    // Tray Icon
-    let tray_menu = Menu::with_items(&[
-        &MenuItem::with_id("settings", "Settings", true, None),
-        &MenuItem::with_id("quit", "Quit Clippy Converter", true, None),
-    ])
-    .expect("Failed to create tray menu");
-
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("Clippy Converter")
-        .build()
-        .expect("Failed to create tray icon");
-
-    (
-        State {
-            config,
-            db,
-            converter,
-            clipboard,
-            enigo,
-            hotkey_manager,
-            hotkey_id: hk,
-            current_result: None,
-            captured_value: 0.0,
-            window_id: None,
-            settings_window_id: None,
-            is_opening_window: false,
-            search_query: String::new(),
-            search_query_lower: String::new(),
-            tray_icon,
-            is_recording_hotkey: false,
-            recorded_hotkey: None,
-            current_mode: WindowMode::SourceUnitSelection,
-            manual_input_value: String::new(),
-        },
-        Task::done(Message::SpawnWorkers),
-    )
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "Centralized update logic for complex UI state"
-)]
-pub fn update(state: &mut State, message: Message) -> Task<Message> {
-    match message {
-        Message::SpawnWorkers => {
-            let db = state.db.clone();
-            let config = state.config.clone();
-            tokio::spawn(crate::workers::start_fiat_worker(
-                db.clone(),
-                config.clone(),
-            ));
-            tokio::spawn(crate::workers::start_crypto_worker(db, config));
-            Task::none()
-        }
-        Message::HotkeyTriggered => handle_hotkey(state),
-        Message::WindowOpened(id) => {
-            state.window_id = Some(id);
-            state.is_opening_window = false;
-            let focus_id = if state.current_mode == WindowMode::ValueInput {
-                "value_input"
-            } else {
-                "search_input"
-            };
-            Task::batch([
-                window::gain_focus(id),
-                iced::widget::operation::focus(TextInputId::new(focus_id)),
-            ])
-        }
-        Message::WindowClosed(id) => {
-            if state.window_id == Some(id) {
-                state.window_id = None;
-            }
-            if state.settings_window_id == Some(id) {
-                state.settings_window_id = None;
-            }
-            Task::none()
-        }
-        Message::WindowUnfocused(id) => {
-            if state.window_id == Some(id) {
-                return window::close(id);
-            }
-            Task::none()
-        }
-        Message::WindowFocused(id) => {
-            if state.window_id == Some(id) {
-                let focus_id = if state.current_mode == WindowMode::ValueInput {
-                    "value_input"
-                } else {
-                    "search_input"
-                };
-                iced::widget::operation::focus(TextInputId::new(focus_id))
-            } else {
-                Task::none()
-            }
-        }
-        Message::SettingsWindowOpened(id) => {
-            state.settings_window_id = Some(id);
-            window::gain_focus(id)
-        }
-        Message::SearchChanged(query) => {
-            state.search_query_lower = query.to_lowercase();
-            state.search_query = query;
-            Task::none()
-        }
-        Message::SubmitSearch => {
-            if state.current_mode == WindowMode::SourceUnitSelection {
-                if state.search_query_lower.is_empty() {
-                    return Task::none();
-                }
-
-                let all_units = state.converter.get_all_units().unwrap_or_default();
-
-                // 1. Try to find exact match (case-insensitive)
-                let exact_match = all_units.iter().find(|u| {
-                    u.symbol.to_lowercase() == state.search_query_lower
-                        || u.aliases
-                            .iter()
-                            .any(|a| a.to_lowercase() == state.search_query_lower)
-                });
-
-                if let Some(unit) = exact_match {
-                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
-                }
-
-                // 2. Fallback to first partial match
-                let partial_match = all_units.iter().find(|u| {
-                    u.symbol.to_lowercase().contains(&state.search_query_lower)
-                        || u.aliases
-                            .iter()
-                            .any(|a| a.to_lowercase().contains(&state.search_query_lower))
-                });
-
-                if let Some(unit) = partial_match {
-                    return update(state, Message::SelectSourceUnit(unit.symbol.clone()));
-                }
-            }
-            Task::none()
-        }
-        Message::ManualInputValueChanged(val) => {
-            state.manual_input_value = val;
-            Task::none()
-        }
-        Message::SubmitManualInputValue => {
-            if let Ok(val) = state.manual_input_value.parse::<f64>() {
-                state.captured_value = val;
-                state.current_mode = WindowMode::SourceUnitSelection;
-                state.search_query = String::new();
-                state.search_query_lower = String::new();
-                iced::widget::operation::focus(TextInputId::new("search_input"))
-            } else {
-                Task::none()
-            }
-        }
-        Message::EditValue => {
-            state.current_mode = WindowMode::ValueInput;
-            state.manual_input_value = state.captured_value.to_string();
-            iced::widget::operation::focus(TextInputId::new("value_input"))
-        }
-        Message::EditSourceUnit => {
-            state.current_mode = WindowMode::SourceUnitSelection;
-            state.search_query = String::new();
-            state.search_query_lower = String::new();
-            iced::widget::operation::focus(TextInputId::new("search_input"))
-        }
-        Message::SelectSourceUnit(unit) => {
-            if let Ok(result) = state.converter.convert(state.captured_value, &unit) {
-                state.current_result = Some(result);
-                state.current_mode = WindowMode::Results;
-                state.search_query = String::new();
-                state.search_query_lower = String::new();
-                log_conversion_if_enabled(state);
-                iced::widget::operation::focus(TextInputId::new("search_input"))
-            } else {
-                Task::none()
-            }
-        }
-        Message::ToggleFavorite(unit) => {
-            if let Some(pos) = state.config.favorites.iter().position(|f| f == &unit) {
-                state.config.favorites.remove(pos);
-            } else {
-                state.config.favorites.push(unit);
-            }
-            let _ = state.config.save();
-            state.converter = Converter::new(state.config.clone(), state.db.clone());
-            Task::none()
-        }
-        Message::Swap(value, unit) => {
-            if let Ok(result) = state.converter.convert(value, &unit) {
-                state.current_result = Some(result);
-                state.current_mode = WindowMode::Results;
-                state.search_query = String::new();
-                state.search_query_lower = String::new();
-                log_conversion_if_enabled(state);
-                iced::widget::operation::focus(TextInputId::new("search_input"))
-            } else {
-                Task::none()
-            }
-        }
-        Message::CloseWindow => state.window_id.map_or_else(Task::none, window::close),
-        Message::OpenSettings => {
-            if state.settings_window_id.is_some() {
-                return Task::none();
-            }
-            let (_, open_task) = window::open(window::Settings {
-                size: (400.0, 500.0).into(),
-                decorations: true,
-                ..Default::default()
-            });
-            open_task.map(Message::SettingsWindowOpened)
-        }
-        Message::ToggleHistory(enabled) => {
-            state.config.history_enabled = enabled;
-            Task::none()
-        }
-        Message::HistoryRetentionChanged(retention) => {
-            state.config.history_retention = retention;
-            Task::none()
-        }
-        Message::OpenHistoryFolder => {
-            if let Ok(path) = crate::history::get_history_path()
-                && let Some(parent) = path.parent()
-            {
-                let _ = open::that(parent);
-            }
-            Task::none()
-        }
-        Message::FiatIntervalChanged(val) => {
-            if let Ok(mins) = val.parse::<u64>() {
-                state.config.fiat_update_interval_mins = mins.max(1);
-            }
-            Task::none()
-        }
-        Message::CryptoIntervalChanged(val) => {
-            if let Ok(mins) = val.parse::<u64>() {
-                state.config.crypto_update_interval_mins = mins.max(1);
-            }
-            Task::none()
-        }
-        Message::StartHotkeyRecording => {
-            state.is_recording_hotkey = true;
-            state.recorded_hotkey = None;
-            let _ = state.hotkey_manager.unregister(state.hotkey_id);
-            Task::none()
-        }
-        Message::CancelHotkeyRecording => {
-            state.is_recording_hotkey = false;
-            state.recorded_hotkey = None;
-            let _ = state.hotkey_manager.register(state.hotkey_id);
-            Task::none()
-        }
-        Message::KeyPressed(key, modifiers) => {
-            if state.is_recording_hotkey {
-                if let Some(hotkey_str) = format_hotkey(&key, modifiers) {
-                    state.recorded_hotkey = Some(hotkey_str);
-                    state.is_recording_hotkey = false;
-                    let _ = state.hotkey_manager.register(state.hotkey_id);
-                } else if matches!(
-                    key,
-                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
-                ) {
-                    state.is_recording_hotkey = false;
-                    state.recorded_hotkey = None;
-                    let _ = state.hotkey_manager.register(state.hotkey_id);
-                }
-            } else if matches!(
-                key,
-                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
-            ) {
-                return state.window_id.map_or_else(Task::none, window::close);
-            }
-            Task::none()
-        }
-        Message::SaveConfig => {
-            if let Some(recorded) = state.recorded_hotkey.take() {
-                state.config.hotkey = recorded;
-            }
-            let _ = state.config.save();
-            // Re-register hotkey if it changed
-            if let Ok(hk) = hotkey::parse_hotkey(&state.config.hotkey)
-                && hk != state.hotkey_id
-            {
-                let _ = state.hotkey_manager.unregister(state.hotkey_id);
-                if state.hotkey_manager.register(hk).is_ok() {
-                    state.hotkey_id = hk;
-                }
-            }
-            Task::none()
-        }
-        Message::ExitRequested => iced::exit(),
-    }
-}
-
-fn log_conversion_if_enabled(state: &State) {
-    if state.config.history_enabled
-        && let Some(result) = &state.current_result
-    {
-        // Log first output as representative
-        if let Some(first_output) = result.outputs.first() {
-            let input_val = result.input_value;
-            let input_unit = result.input_unit.clone();
-            let out_val = first_output.value;
-            let out_unit = first_output.unit.clone();
-            let retention = state.config.history_retention;
-
-            tokio::spawn(async move {
-                let _ = crate::history::log_conversion(
-                    input_val,
-                    &input_unit,
-                    out_val,
-                    &out_unit,
-                    retention.to_days(),
-                )
-                .await;
-            });
-        }
-    }
-}
-
-fn handle_hotkey(state: &mut State) -> Task<Message> {
-    if state.is_opening_window {
-        return Task::none();
-    }
-    state.is_opening_window = true;
-
-    let parsed_opt = state
-        .clipboard
-        .capture_selection()
-        .ok()
-        .and_then(|text| crate::parser::parse_input(&text).ok());
-
-    if let Some(parsed) = parsed_opt {
-        state.captured_value = parsed.value;
-        if let Some(ref unit) = parsed.unit
-            && let Ok(result) = state.converter.convert(parsed.value, unit)
-        {
-            state.current_result = Some(result);
-            state.current_mode = WindowMode::Results;
-            log_conversion_if_enabled(state);
-        } else {
-            state.current_result = None;
-            state.current_mode = WindowMode::SourceUnitSelection;
-        }
-    } else {
-        state.captured_value = 0.0;
-        state.current_result = None;
-        state.current_mode = WindowMode::ValueInput;
-        state.manual_input_value = String::new();
-    }
-
-    state.search_query = String::new();
-    state.search_query_lower = String::new();
-
-    let (x, y) = state.enigo.location().unwrap_or((100, 100));
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "Screen coordinates fit in f32 mantissa"
-    )]
-    let settings = window::Settings {
-        size: (350.0, 400.0).into(),
-        position: window::Position::Specific(iced::Point::new(x as f32, y as f32)),
-        decorations: false,
-        transparent: true,
-        level: window::Level::AlwaysOnTop,
-        platform_specific: iced::window::settings::PlatformSpecific {
-            skip_taskbar: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    // If a window is already open, close it first
-    if let Some(id) = state.window_id {
-        return window::close::<Message>(id)
-            .then(move |_| window::open(settings.clone()).1.map(Message::WindowOpened));
-    }
-    window::open(settings).1.map(Message::WindowOpened)
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "View logic for multi-window application"
-)]
-#[allow(
-    clippy::option_if_let_else,
-    reason = "if let Some is more readable for complex UI branching"
-)]
-#[must_use]
-pub fn view(state: &State, window_id: window::Id) -> Element<'_, Message> {
-    if state.settings_window_id == Some(window_id) {
-        return view_settings(state);
-    }
-
-    let content = match state.current_mode {
-        WindowMode::ValueInput => column![
-            row![
-                text("Enter number to convert")
-                    .size(24)
-                    .color(Color::WHITE)
-                    .width(Length::Fill),
-                button(text("×").color(Color::WHITE))
-                    .padding(5)
-                    .on_press(Message::CloseWindow)
-                    .style(button::secondary)
-            ]
-            .align_y(Alignment::Center),
-            text_input("e.g. 10.5", &state.manual_input_value)
-                .id(TextInputId::new("value_input"))
-                .on_input(Message::ManualInputValueChanged)
-                .on_submit(Message::SubmitManualInputValue)
-                .padding(10)
-                .size(20),
-        ]
-        .spacing(15)
-        .align_x(Alignment::Start),
-
-        WindowMode::Results => {
-            if let Some(result) = &state.current_result {
-                column![
-                    row![
-                        button(
-                            text(format!("{:.2}", result.input_value))
-                                .size(24)
-                                .color(Color::WHITE)
-                        )
-                        .padding(2)
-                        .on_press(Message::EditValue)
-                        .style(button::text),
-                        text(" ").size(24).color(Color::WHITE),
-                        button(
-                            text(result.input_unit.clone())
-                                .size(24)
-                                .color(Color::WHITE)
-                        )
-                        .padding(2)
-                        .on_press(Message::EditSourceUnit)
-                        .style(button::text),
-                        Space::new().width(Length::Fill),
-                        button(text("×").color(Color::WHITE))
-                            .padding(5)
-                            .on_press(Message::CloseWindow)
-                            .style(button::secondary)
-                    ]
-                    .align_y(Alignment::Center),
-                    text_input("Search units...", &state.search_query)
-                        .id(TextInputId::new("search_input"))
-                        .on_input(Message::SearchChanged)
-                        .on_submit(Message::SubmitSearch)
-                        .padding(10)
-                        .size(16),
-                    scrollable(
-                        column(
-                            result
-                                .outputs
-                                .iter()
-                                .filter(|o| o
-                                    .unit
-                                    .to_lowercase()
-                                    .contains(&state.search_query_lower))
-                                .take(state.config.list_size)
-                                .map(|output| {
-                                    let is_favorite = state.config.favorites.contains(&output.unit);
-                                    let favorite_label = if is_favorite { "★" } else { "☆" };
-
-                                    container(
-                                        row![
-                                            column![
-                                                text(format!("{:.4}", output.value))
-                                                    .size(18)
-                                                    .color(Color::WHITE),
-                                                text(&output.unit)
-                                                    .size(14)
-                                                    .color(Color::from_rgb8(150, 150, 150))
-                                            ]
-                                            .width(Length::Fill),
-                                            row![
-                                                button(text("⇌"))
-                                                    .on_press(Message::Swap(
-                                                        output.value,
-                                                        output.unit.clone()
-                                                    ))
-                                                    .padding(5),
-                                                button(text(favorite_label))
-                                                    .on_press(Message::ToggleFavorite(
-                                                        output.unit.clone()
-                                                    ))
-                                                    .padding(5)
-                                            ]
-                                            .spacing(5)
-                                        ]
-                                        .align_y(Alignment::Center),
-                                    )
-                                    .padding(10)
-                                    .style(|_theme: &Theme| container::Style {
-                                        border: iced::Border {
-                                            color: Color::from_rgba8(255, 255, 255, 0.1),
-                                            width: 1.0,
-                                            radius: 4.0.into(),
-                                        },
-                                        ..Default::default()
-                                    })
-                                    .into()
-                                })
-                        )
-                        .spacing(10)
-                    )
-                ]
-                .spacing(15)
-                .align_x(Alignment::Start)
-            } else {
-                column![text("No results").color(Color::WHITE)]
-            }
-        }
-
-        WindowMode::SourceUnitSelection => {
-            let all_units = state.converter.get_all_units().unwrap_or_default();
-
-            column![
-                row![
-                    text("Convert ").size(24).color(Color::WHITE),
-                    button(
-                        text(format!("{:.4}", state.captured_value))
-                            .size(24)
-                            .color(Color::WHITE)
-                    )
-                    .padding(2)
-                    .on_press(Message::EditValue)
-                    .style(button::text),
-                    text(" ...").size(24).color(Color::WHITE),
-                    Space::new().width(Length::Fill),
-                    button(text("×").color(Color::WHITE))
-                        .padding(5)
-                        .on_press(Message::CloseWindow)
-                        .style(button::secondary)
-                ]
-                .align_y(Alignment::Center),
-                text_input("Search source unit...", &state.search_query)
-                    .id(TextInputId::new("search_input"))
-                    .on_input(Message::SearchChanged)
-                    .on_submit(Message::SubmitSearch)
-                    .padding(10)
-                    .size(16),
-                scrollable(
-                    column(
-                        all_units
-                            .into_iter()
-                            .filter(|u| {
-                                u.symbol.to_lowercase().contains(&state.search_query_lower)
-                                    || u.aliases.iter().any(|a| {
-                                        a.to_lowercase().contains(&state.search_query_lower)
-                                    })
-                            })
-                            .take(state.config.list_size)
-                            .map(|unit| {
-                                let aliases_str = if unit.aliases.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("({})", unit.aliases.join(", "))
-                                };
-
-                                button(
-                                    column![
-                                        text(unit.symbol.clone()).color(Color::WHITE),
-                                        if unit.aliases.is_empty() {
-                                            Element::from(column![])
-                                        } else {
-                                            text(aliases_str)
-                                                .size(12)
-                                                .color(Color::from_rgb8(120, 120, 120))
-                                                .into()
-                                        }
-                                    ]
-                                    .spacing(2),
-                                )
-                                .on_press(Message::SelectSourceUnit(unit.symbol))
-                                .width(Length::Fill)
-                                .padding(10)
-                                .style(button::secondary)
-                                .into()
-                            })
-                    )
-                    .spacing(5)
-                )
-            ]
-            .spacing(15)
-            .align_x(Alignment::Start)
-        }
-    };
-
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Color::from_rgba8(30, 30, 30, 0.98).into()),
-            border: iced::Border {
-                color: Color::from_rgb8(60, 60, 60),
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    let hotkey_sub = Subscription::run(|| {
-        iced::stream::channel(
-            100,
-            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-                std::thread::spawn(move || {
-                    let receiver = GlobalHotKeyEvent::receiver();
-                    while let Ok(event) = receiver.recv() {
-                        if tx.send(event).is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                while let Some(event) = rx.recv().await {
-                    if event.state == HotKeyState::Pressed {
-                        use iced::futures::SinkExt;
-                        let _ = output.send(Message::HotkeyTriggered).await;
-                    }
-                }
-            },
-        )
-    });
-
-    let keyboard_sub = iced::keyboard::listen().filter_map(|event| {
-        if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
-            return Some(Message::KeyPressed(key, modifiers));
-        }
-        None
-    });
-
-    let tray_sub = Subscription::run(|| {
-        iced::stream::channel(
-            100,
-            |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-                std::thread::spawn(move || {
-                    let receiver = MenuEvent::receiver();
-                    while let Ok(event) = receiver.recv() {
-                        if tx.send(event).is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                while let Some(event) = rx.recv().await {
-                    use iced::futures::SinkExt;
-                    match event.id.0.as_str() {
-                        "quit" => {
-                            let _ = output.send(Message::ExitRequested).await;
-                        }
-                        "settings" => {
-                            let _ = output.send(Message::OpenSettings).await;
-                        }
-                        _ => {}
-                    }
-                }
-            },
-        )
-    });
-
-    let window_event_sub = iced::event::listen_with(|event, _status, id| match event {
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
-        iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused(id)),
-        iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
-        _ => None,
-    });
-
-    Subscription::batch(vec![hotkey_sub, keyboard_sub, tray_sub, window_event_sub])
-}
-
-fn format_hotkey(
-    key: &iced::keyboard::Key,
-    modifiers: iced::keyboard::Modifiers,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    // On Windows/Linux, iced::Modifiers::command() refers to Control.
-    // We use logo() for the OS key (Meta/Win/Super) and explicit control() for Ctrl.
-    if modifiers.logo() {
-        parts.push("Meta");
-    }
-    if modifiers.control() {
-        parts.push("Ctrl");
-    }
-    if modifiers.alt() {
-        parts.push("Alt");
-    }
-    if modifiers.shift() {
-        parts.push("Shift");
-    }
-
-    let key_str = match key {
-        iced::keyboard::Key::Character(c) => c.to_uppercase(),
-        iced::keyboard::Key::Named(named) => match named {
-            iced::keyboard::key::Named::Enter => "Enter".to_string(),
-            iced::keyboard::key::Named::Tab => "Tab".to_string(),
-            iced::keyboard::key::Named::Space => "Space".to_string(),
-            iced::keyboard::key::Named::Escape => "Escape".to_string(),
-            iced::keyboard::key::Named::Backspace => "Backspace".to_string(),
-            iced::keyboard::key::Named::Delete => "Delete".to_string(),
-            iced::keyboard::key::Named::Insert => "Insert".to_string(),
-            iced::keyboard::key::Named::Home => "Home".to_string(),
-            iced::keyboard::key::Named::End => "End".to_string(),
-            iced::keyboard::key::Named::PageUp => "PageUp".to_string(),
-            iced::keyboard::key::Named::PageDown => "PageDown".to_string(),
-            iced::keyboard::key::Named::ArrowUp => "Up".to_string(),
-            iced::keyboard::key::Named::ArrowDown => "Down".to_string(),
-            iced::keyboard::key::Named::ArrowLeft => "Left".to_string(),
-            iced::keyboard::key::Named::ArrowRight => "Right".to_string(),
-            _ => return None,
-        },
-        iced::keyboard::Key::Unidentified => return None,
-    };
-
-    if key_str.is_empty() {
-        return None;
-    }
-
-    // Check if key_str is a modifier itself (to avoid "Ctrl+Ctrl")
-    // Note: Iced's Named variant for modifiers are different,
-    // but Character might catch some if something weird happens.
-    // More importantly, we don't want to return just "Ctrl" as a hotkey usually,
-    // though global-hotkey might allow it. But our parser expects at least one non-modifier.
-    if matches!(
-        key_str.as_str(),
-        "Ctrl" | "Alt" | "Shift" | "Meta" | "Control" | "Command" | "Win"
-    ) {
-        return None;
-    }
-
-    parts.push(&key_str);
-    Some(parts.join("+"))
+    Exit,
 }
 
 impl std::fmt::Display for HistoryRetention {
@@ -863,111 +38,918 @@ impl std::fmt::Display for HistoryRetention {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
+pub struct AppState {
+    pub config: Config,
+    pub db: Db,
+    pub converter: Converter,
+    pub clipboard: ClipboardManager,
+    pub enigo: Enigo,
+    pub hotkey_manager: GlobalHotKeyManager,
+    pub hotkey_id: global_hotkey::hotkey::HotKey,
+    pub tray_icon: TrayIcon,
+    pub event_rx: Receiver<EventMsg>,
+
+    pub current_result: Option<ConversionResult>,
+    pub captured_value: f64,
+    pub search_query: String,
+    pub search_query_lower: String,
+    pub manual_input_value: String,
+    pub current_mode: WindowMode,
+
+    pub is_recording_hotkey: bool,
+    pub recorded_hotkey: Option<String>,
+
+    pub main_window_open: bool,
+    pub main_window_pos: egui::Pos2,
+    pub settings_window_open: bool,
+
+    pub focus_main_input: bool,
+    pub main_window_was_focused: bool,
+
+    pub copied_notification: Option<(String, Instant)>,
+
+    pub config_fiat_interval_str: String,
+    pub config_crypto_interval_str: String,
+}
+
+/// Runs the eframe application.
+///
+/// # Errors
+/// Returns an error if eframe or required services fail to initialize.
+///
+/// # Panics
+/// Panics if the tokio runtime cannot be created.
 #[allow(clippy::too_many_lines)]
-fn view_settings(state: &State) -> Element<'_, Message> {
-    let hotkey_label = if state.is_recording_hotkey {
-        "Recording... (Esc to cancel)".to_string()
-    } else {
-        state
-            .recorded_hotkey
-            .as_ref()
-            .unwrap_or(&state.config.hotkey)
-            .clone()
+#[expect(
+    clippy::expect_used,
+    reason = "Critical infrastructure failure at startup is non-recoverable"
+)]
+pub fn run(config: Config, db: Db) -> Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_visible(false)
+            .with_taskbar(false)
+            .with_decorations(false)
+            .with_transparent(true),
+        run_and_return: false,
+        ..Default::default()
     };
 
-    let content = column![
-        text("Settings").size(24).color(Color::WHITE),
-        column![
-            text("Global Hotkey")
-                .size(16)
-                .color(Color::from_rgb8(200, 200, 200)),
-            button(text(hotkey_label).color(if state.is_recording_hotkey {
-                Color::from_rgb8(255, 100, 100)
-            } else {
-                Color::WHITE
-            }))
-            .on_press(Message::StartHotkeyRecording)
-            .padding(10)
-            .width(Length::Fill)
-            .style(button::secondary),
-        ]
-        .spacing(5),
-        column![
-            checkbox(state.config.history_enabled)
-                .label("Enable History Logging")
-                .on_toggle(Message::ToggleHistory)
-                .size(20),
-            if state.config.history_enabled {
-                column![
-                    text("Retention Period")
-                        .size(14)
-                        .color(Color::from_rgb8(150, 150, 150)),
-                    pick_list(
-                        &[
-                            HistoryRetention::SevenDays,
-                            HistoryRetention::ThirtyDays,
-                            HistoryRetention::OneYear,
-                            HistoryRetention::Never
-                        ][..],
-                        Some(state.config.history_retention),
-                        Message::HistoryRetentionChanged,
-                    )
-                    .width(Length::Fill),
-                ]
-                .spacing(5)
-                .into()
-            } else {
-                Element::from(column![])
-            },
-            button(text("Open History Folder").color(Color::WHITE))
-                .on_press(Message::OpenHistoryFolder)
-                .padding(10)
-                .style(button::secondary),
-        ]
-        .spacing(10),
-        column![
-            text("Update Intervals (minutes)")
-                .size(16)
-                .color(Color::from_rgb8(200, 200, 200)),
-            row![
-                column![
-                    text("Fiat").size(12).color(Color::from_rgb8(150, 150, 150)),
-                    text_input("1440", &state.config.fiat_update_interval_mins.to_string())
-                        .on_input(Message::FiatIntervalChanged)
-                        .padding(10),
-                ]
-                .width(Length::Fill),
-                column![
-                    text("Crypto")
-                        .size(12)
-                        .color(Color::from_rgb8(150, 150, 150)),
-                    text_input("1", &state.config.crypto_update_interval_mins.to_string())
-                        .on_input(Message::CryptoIntervalChanged)
-                        .padding(10),
-                ]
-                .width(Length::Fill),
-            ]
-            .spacing(20),
-            text("Note: Crypto defaults to 1 min, Fiat to 24h (1440 min).")
-                .size(12)
-                .color(Color::from_rgb8(100, 100, 100)),
-        ]
-        .spacing(5),
-        button(text("Save & Apply").color(Color::WHITE))
-            .on_press(Message::SaveConfig)
-            .padding(12)
-            .width(Length::Fill)
-            .style(button::primary),
-    ]
-    .spacing(25)
-    .padding(20);
+    let converter = Converter::new(config.clone(), db.clone());
+    let clipboard = ClipboardManager::new().context("Failed to initialize clipboard")?;
+    let enigo = Enigo::new(&EnigoSettings::default()).context("Failed to initialize enigo")?;
+    let hotkey_manager =
+        GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
+    let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
+    let _ = hotkey_manager.register(hk);
 
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Color::from_rgb8(30, 30, 30).into()),
-            ..Default::default()
-        })
-        .into()
+    let tray_menu = Menu::with_items(&[
+        &MenuItem::with_id("settings", "Settings", true, None),
+        &MenuItem::with_id("quit", "Quit Clippy Converter", true, None),
+    ])
+    .context("Failed to create tray menu")?;
+
+    let tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Clippy Converter")
+        .build()
+        .context("Failed to create tray icon")?;
+
+    let fiat_str = config.fiat_update_interval_mins.to_string();
+    let crypto_str = config.crypto_update_interval_mins.to_string();
+
+    let (tx, rx) = mpsc::channel();
+
+    // Spawn tokio runtime for background workers
+    std::thread::spawn({
+        let db_fiat = db.clone();
+        let config_fiat = config.clone();
+        let db_crypto = db.clone();
+        let config_crypto = config.clone();
+
+        move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(async {
+                tokio::spawn(crate::workers::start_fiat_worker(db_fiat, config_fiat));
+                tokio::spawn(crate::workers::start_crypto_worker(
+                    db_crypto,
+                    config_crypto,
+                ));
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+
+    eframe::run_native(
+        "Clippy Converter Daemon",
+        options,
+        Box::new(move |cc| {
+            let tx_hk = tx.clone();
+            let ctx_hk = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                let receiver = GlobalHotKeyEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    if event.state == HotKeyState::Pressed {
+                        let _ = tx_hk.send(EventMsg::HotkeyTriggered);
+                        ctx_hk.request_repaint();
+                    }
+                }
+            });
+
+            let tx_tray = tx.clone();
+            let ctx_tray = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                let receiver = MenuEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    match event.id.0.as_str() {
+                        "quit" => {
+                            let _ = tx_tray.send(EventMsg::Exit);
+                            ctx_tray.request_repaint();
+                        }
+                        "settings" => {
+                            let _ = tx_tray.send(EventMsg::OpenSettings);
+                            ctx_tray.request_repaint();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+
+            let mut style = (*cc.egui_ctx.global_style()).clone();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
+            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+            style.spacing.window_margin = egui::Margin::same(15);
+            cc.egui_ctx.set_global_style(style);
+
+            Ok(Box::new(AppState {
+                config,
+                db,
+                converter,
+                clipboard,
+                enigo,
+                hotkey_manager,
+                hotkey_id: hk,
+                tray_icon,
+                event_rx: rx,
+
+                current_result: None,
+                captured_value: 0.0,
+                search_query: String::new(),
+                search_query_lower: String::new(),
+                manual_input_value: String::new(),
+                current_mode: WindowMode::SourceUnitSelection,
+
+                is_recording_hotkey: false,
+                recorded_hotkey: None,
+
+                main_window_open: false,
+                main_window_pos: egui::Pos2::ZERO,
+                settings_window_open: false,
+
+                focus_main_input: false,
+                main_window_was_focused: false,
+
+                copied_notification: None,
+
+                config_fiat_interval_str: fiat_str,
+                config_crypto_interval_str: crypto_str,
+            }))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {e}"))
+}
+
+impl eframe::App for AppState {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.run_logic(ctx, frame);
+    }
+
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Handled via update
+    }
+}
+
+impl AppState {
+    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ensure the root window remains hidden
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+
+        while let Ok(msg) = self.event_rx.try_recv() {
+            match msg {
+                EventMsg::Exit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                EventMsg::OpenSettings => {
+                    self.settings_window_open = true;
+                }
+                EventMsg::HotkeyTriggered => {
+                    self.handle_hotkey(ctx);
+                }
+            }
+        }
+
+        if self.settings_window_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("settings"),
+                egui::ViewportBuilder::default()
+                    .with_title("Settings")
+                    .with_inner_size([400.0, 500.0]),
+                |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        self.settings_window_open = false;
+                    }
+                    #[allow(deprecated)]
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        self.render_settings(ui, ctx);
+                    });
+                },
+            );
+        }
+
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("main"),
+            egui::ViewportBuilder::default()
+                .with_title("Clippy Converter")
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_always_on_top()
+                .with_taskbar(false)
+                .with_visible(false)
+                .with_inner_size([350.0, 400.0])
+                .with_position(self.main_window_pos),
+            |ctx, _class| {
+                if !self.main_window_open {
+                    return;
+                }
+
+                let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+                if !focused && self.main_window_was_focused {
+                    self.main_window_open = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                self.main_window_was_focused = focused;
+
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.main_window_open = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+
+                let frame = egui::Frame {
+                    fill: egui::Color32::from_rgba_unmultiplied(30, 30, 30, 250),
+                    stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
+                    corner_radius: egui::CornerRadius::same(12),
+                    inner_margin: egui::Margin::same(20),
+                    ..Default::default()
+                };
+
+                #[allow(deprecated)]
+                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                    self.render_main_window(ui, ctx);
+                });
+            },
+        );
+    }
+
+    #[expect(
+        clippy::unwrap_used,
+        reason = "tokio runtime creation in simple thread is expected to succeed"
+    )]
+    fn log_conversion_if_enabled(&self) {
+        if self.config.history_enabled
+            && let Some(result) = &self.current_result
+            && let Some(first_output) = result.outputs.first()
+        {
+            let input_val = result.input_value;
+            let input_unit = result.input_unit.clone();
+            let out_val = first_output.value;
+            let out_unit = first_output.unit.clone();
+            let retention = self.config.history_retention;
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let _ = crate::history::log_conversion(
+                        input_val,
+                        &input_unit,
+                        out_val,
+                        &out_unit,
+                        retention.to_days(),
+                    )
+                    .await;
+                });
+            });
+        }
+    }
+
+    fn handle_hotkey(&mut self, ctx: &egui::Context) {
+        let parsed_opt = self
+            .clipboard
+            .capture_selection()
+            .ok()
+            .and_then(|text| crate::parser::parse_input(&text).ok());
+
+        if let Some(parsed) = parsed_opt {
+            self.captured_value = parsed.value;
+            if let Some(ref unit) = parsed.unit {
+                if let Ok(result) = self.converter.convert(parsed.value, unit) {
+                    self.current_result = Some(result);
+                    self.current_mode = WindowMode::Results;
+                    self.log_conversion_if_enabled();
+                } else {
+                    self.current_result = None;
+                    self.current_mode = WindowMode::SourceUnitSelection;
+                }
+            } else {
+                self.current_result = None;
+                self.current_mode = WindowMode::SourceUnitSelection;
+            }
+        } else {
+            self.captured_value = 0.0;
+            self.current_result = None;
+            self.current_mode = WindowMode::ValueInput;
+            self.manual_input_value = String::new();
+        }
+
+        self.search_query = String::new();
+        self.search_query_lower = String::new();
+
+        let (x, y) = self.enigo.location().unwrap_or((100, 100));
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Screen coordinates fit in f32 mantissa"
+        )]
+        {
+            self.main_window_pos = egui::pos2(x as f32, y as f32);
+        }
+
+        self.main_window_open = true;
+        self.main_window_was_focused = false;
+        self.focus_main_input = true;
+
+        let main_viewport_id = egui::ViewportId::from_hash_of("main");
+        ctx.send_viewport_cmd_to(
+            main_viewport_id,
+            egui::ViewportCommand::OuterPosition(self.main_window_pos),
+        );
+        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Focus);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_settings(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        if self.is_recording_hotkey {
+            ui.ctx().input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } = event
+                    {
+                        if *key == egui::Key::Escape {
+                            self.is_recording_hotkey = false;
+                            self.recorded_hotkey = None;
+                            let _ = self.hotkey_manager.register(self.hotkey_id);
+                        } else if let Some(hk) = format_hotkey(*key, *modifiers) {
+                            self.recorded_hotkey = Some(hk);
+                            self.is_recording_hotkey = false;
+                            let _ = self.hotkey_manager.register(self.hotkey_id);
+                        }
+                    }
+                }
+            });
+        }
+
+        ui.heading("Settings");
+        ui.separator();
+
+        ui.label("Global Hotkey");
+        let hotkey_label = if self.is_recording_hotkey {
+            "Recording... (Esc to cancel)".to_string()
+        } else {
+            self.recorded_hotkey
+                .as_ref()
+                .unwrap_or(&self.config.hotkey)
+                .clone()
+        };
+
+        if ui.button(hotkey_label).clicked() {
+            self.is_recording_hotkey = true;
+            self.recorded_hotkey = None;
+            let _ = self.hotkey_manager.unregister(self.hotkey_id);
+        }
+
+        ui.separator();
+
+        ui.checkbox(&mut self.config.history_enabled, "Enable History Logging");
+        if self.config.history_enabled {
+            egui::ComboBox::from_label("Retention Period")
+                .selected_text(self.config.history_retention.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.history_retention,
+                        HistoryRetention::SevenDays,
+                        "7 Days",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.history_retention,
+                        HistoryRetention::ThirtyDays,
+                        "30 Days",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.history_retention,
+                        HistoryRetention::OneYear,
+                        "1 Year",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.history_retention,
+                        HistoryRetention::Never,
+                        "Never",
+                    );
+                });
+        }
+
+        if ui.button("Open History Folder").clicked()
+            && let Ok(path) = crate::history::get_history_path()
+            && let Some(parent) = path.parent()
+        {
+            let _ = open::that(parent);
+        }
+
+        ui.separator();
+        ui.label("Update Intervals (minutes)");
+        ui.horizontal(|ui| {
+            ui.label("Fiat:");
+            ui.text_edit_singleline(&mut self.config_fiat_interval_str);
+            ui.label("Crypto:");
+            ui.text_edit_singleline(&mut self.config_crypto_interval_str);
+        });
+
+        ui.separator();
+        if ui.button("Save & Apply").clicked() {
+            if let Ok(mins) = self.config_fiat_interval_str.parse::<u64>() {
+                self.config.fiat_update_interval_mins = mins.max(1);
+            }
+            if let Ok(mins) = self.config_crypto_interval_str.parse::<u64>() {
+                self.config.crypto_update_interval_mins = mins.max(1);
+            }
+            if let Some(recorded) = self.recorded_hotkey.take() {
+                self.config.hotkey = recorded;
+            }
+            let _ = self.config.save();
+            if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
+                && hk != self.hotkey_id
+            {
+                let _ = self.hotkey_manager.unregister(self.hotkey_id);
+                if self.hotkey_manager.register(hk).is_ok() {
+                    self.hotkey_id = hk;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_main_window(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Allocate space for the header first. This allows us to add a drag interaction
+        // to the background before we add the actual interactive widgets.
+        let header_height = 32.0;
+        let (header_rect, _) = ui.allocate_at_least(
+            egui::vec2(ui.available_width(), header_height),
+            egui::Sense::hover(),
+        );
+
+        // Add the drag interaction to the background. Since it's added first,
+        // any widgets added on top of this area later will take priority for interactions.
+        let drag_response = ui.interact(
+            header_rect,
+            ui.id().with("header_drag"),
+            egui::Sense::drag(),
+        );
+        if drag_response.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        // Render the header content on top of the background drag area.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                match self.current_mode {
+                    WindowMode::ValueInput => {
+                        ui.label(egui::RichText::new("Enter value").strong());
+                    }
+                    WindowMode::SourceUnitSelection => {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{:.4}", self.captured_value)).strong(),
+                            )
+                            .clicked()
+                        {
+                            self.current_mode = WindowMode::ValueInput;
+                            self.manual_input_value = self.captured_value.to_string();
+                            self.focus_main_input = true;
+                        }
+                        ui.label(
+                            egui::RichText::new("select unit")
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                    WindowMode::Results => {
+                        if let Some(res) = &self.current_result {
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!("{:.2}", res.input_value)).strong(),
+                                )
+                                .clicked()
+                            {
+                                self.current_mode = WindowMode::ValueInput;
+                                self.manual_input_value = self.captured_value.to_string();
+                                self.focus_main_input = true;
+                            }
+                            if ui
+                                .button(egui::RichText::new(&res.input_unit).strong())
+                                .clicked()
+                            {
+                                self.current_mode = WindowMode::SourceUnitSelection;
+                                self.search_query.clear();
+                                self.search_query_lower.clear();
+                                self.focus_main_input = true;
+                            }
+                        }
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(egui::include_image!("../icons/close.svg"))
+                                .tint(ui.visuals().text_color()),
+                        ))
+                        .clicked()
+                    {
+                        self.main_window_open = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
+                });
+            });
+        });
+
+        ui.add_space(5.0);
+
+        if self.current_mode == WindowMode::ValueInput {
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.manual_input_value)
+                        .hint_text("0.00")
+                        .font(egui::TextStyle::Heading)
+                        .desired_width(f32::INFINITY),
+                );
+                if self.focus_main_input {
+                    response.request_focus();
+                    self.focus_main_input = false;
+                }
+                if ((response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    && let Ok(val) = self.manual_input_value.parse::<f64>()
+                {
+                    self.captured_value = val;
+                    self.current_mode = WindowMode::SourceUnitSelection;
+                    self.search_query.clear();
+                    self.search_query_lower.clear();
+                    self.focus_main_input = true;
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Search units...")
+                        .desired_width(f32::INFINITY),
+                );
+                if response.changed() {
+                    self.search_query_lower = self.search_query.to_lowercase();
+                }
+                if self.focus_main_input {
+                    response.request_focus();
+                    self.focus_main_input = false;
+                }
+
+                if self.current_mode == WindowMode::SourceUnitSelection
+                    && response.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !self.search_query_lower.is_empty()
+                {
+                    let all_units = self.converter.get_all_units().unwrap_or_default();
+                    let exact = all_units.iter().find(|u| {
+                        u.symbol.to_lowercase() == self.search_query_lower
+                            || u.aliases
+                                .iter()
+                                .any(|a| a.to_lowercase() == self.search_query_lower)
+                    });
+                    let partial = all_units.iter().find(|u| {
+                        u.symbol.to_lowercase().contains(&self.search_query_lower)
+                            || u.aliases
+                                .iter()
+                                .any(|a| a.to_lowercase().contains(&self.search_query_lower))
+                    });
+
+                    if let Some(unit) = exact.or(partial)
+                        && let Ok(result) =
+                            self.converter.convert(self.captured_value, &unit.symbol)
+                    {
+                        self.current_result = Some(result);
+                        self.current_mode = WindowMode::Results;
+                        self.search_query.clear();
+                        self.search_query_lower.clear();
+                        self.log_conversion_if_enabled();
+                        self.focus_main_input = true;
+                    }
+                }
+            });
+
+            ui.add_space(5.0);
+
+            if self.current_mode == WindowMode::SourceUnitSelection {
+                let all_units = self.converter.get_all_units().unwrap_or_default();
+                let matching_units: Vec<_> = all_units
+                    .into_iter()
+                    .filter(|u| {
+                        u.symbol.to_lowercase().contains(&self.search_query_lower)
+                            || u.aliases
+                                .iter()
+                                .any(|a| a.to_lowercase().contains(&self.search_query_lower))
+                    })
+                    .take(self.config.list_size)
+                    .collect();
+
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            for unit in matching_units {
+                                let aliases_str = if unit.aliases.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", unit.aliases.join(", "))
+                                };
+
+                                let button_text =
+                                    egui::RichText::new(format!("{} {}", unit.symbol, aliases_str));
+                                if ui
+                                    .add(
+                                        egui::Button::new(button_text)
+                                            .fill(egui::Color32::TRANSPARENT),
+                                    )
+                                    .clicked()
+                                    && let Ok(result) =
+                                        self.converter.convert(self.captured_value, &unit.symbol)
+                                {
+                                    self.current_result = Some(result);
+                                    self.current_mode = WindowMode::Results;
+                                    self.search_query.clear();
+                                    self.search_query_lower.clear();
+                                    self.log_conversion_if_enabled();
+                                    self.focus_main_input = true;
+                                }
+                            }
+                        });
+                    });
+            } else if self.current_mode == WindowMode::Results {
+                let outputs = if let Some(result) = &self.current_result {
+                    result
+                        .outputs
+                        .iter()
+                        .filter(|o| o.unit.to_lowercase().contains(&self.search_query_lower))
+                        .take(self.config.list_size)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+
+                if !outputs.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                for output in outputs {
+                                    let is_favorite = self.config.favorites.contains(&output.unit);
+                                    let favorite_icon = if is_favorite {
+                                        egui::include_image!("../icons/favorite_on.svg")
+                                    } else {
+                                        egui::include_image!("../icons/favorite.svg")
+                                    };
+
+                                    let tint = if is_favorite {
+                                        egui::Color32::from_rgb(255, 215, 0)
+                                    } else {
+                                        ui.visuals().text_color()
+                                    };
+
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("{:.4}", output.value))
+                                                    .strong()
+                                                    .size(18.0),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&output.unit)
+                                                    .size(14.0)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(favorite_icon).tint(tint),
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if let Some(pos) = self
+                                                        .config
+                                                        .favorites
+                                                        .iter()
+                                                        .position(|f| f == &output.unit)
+                                                    {
+                                                        self.config.favorites.remove(pos);
+                                                    } else {
+                                                        self.config
+                                                            .favorites
+                                                            .push(output.unit.clone());
+                                                    }
+                                                    let _ = self.config.save();
+                                                    self.converter = Converter::new(
+                                                        self.config.clone(),
+                                                        self.db.clone(),
+                                                    );
+                                                }
+
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(egui::include_image!(
+                                                            "../icons/switch.svg"
+                                                        ))
+                                                        .tint(ui.visuals().text_color()),
+                                                    ))
+                                                    .clicked()
+                                                    && let Ok(new_res) = self
+                                                        .converter
+                                                        .convert(output.value, &output.unit)
+                                                {
+                                                    self.current_result = Some(new_res);
+                                                    self.captured_value = output.value;
+                                                    self.search_query.clear();
+                                                    self.search_query_lower.clear();
+                                                    self.log_conversion_if_enabled();
+                                                    self.focus_main_input = true;
+                                                }
+
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(egui::include_image!(
+                                                            "../icons/copy.svg"
+                                                        ))
+                                                        .tint(ui.visuals().text_color()),
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if output.value.is_nan() || output.value.is_infinite() {
+                                                        self.copied_notification = Some((
+                                                            "Invalid value".to_string(),
+                                                            Instant::now(),
+                                                        ));
+                                                    } else {
+                                                        let val_str = output.value.to_string();
+                                                        if self.clipboard.set_text(val_str).is_ok() {
+                                                            self.copied_notification = Some((
+                                                                "Copied!".to_string(),
+                                                                Instant::now(),
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.separator();
+                                }
+                            });
+                        });
+                }
+            }
+        }
+
+        if let Some((msg, time)) = &self.copied_notification {
+            if Instant::now().duration_since(*time) > Duration::from_secs(2) {
+                self.copied_notification = None;
+            } else {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(msg)
+                            .color(if msg == "Copied!" {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::RED
+                            })
+                            .strong(),
+                    );
+                });
+                ctx.request_repaint();
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn format_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
+    let mut parts = Vec::new();
+    if modifiers.mac_cmd || modifiers.command {
+        parts.push("Meta");
+    }
+    if modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if modifiers.alt {
+        parts.push("Alt");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+
+    let key_str = match key {
+        egui::Key::A => "A",
+        egui::Key::B => "B",
+        egui::Key::C => "C",
+        egui::Key::D => "D",
+        egui::Key::E => "E",
+        egui::Key::F => "F",
+        egui::Key::G => "G",
+        egui::Key::H => "H",
+        egui::Key::I => "I",
+        egui::Key::J => "J",
+        egui::Key::K => "K",
+        egui::Key::L => "L",
+        egui::Key::M => "M",
+        egui::Key::N => "N",
+        egui::Key::O => "O",
+        egui::Key::P => "P",
+        egui::Key::Q => "Q",
+        egui::Key::R => "R",
+        egui::Key::S => "S",
+        egui::Key::T => "T",
+        egui::Key::U => "U",
+        egui::Key::V => "V",
+        egui::Key::W => "W",
+        egui::Key::X => "X",
+        egui::Key::Y => "Y",
+        egui::Key::Z => "Z",
+        egui::Key::Num0 => "0",
+        egui::Key::Num1 => "1",
+        egui::Key::Num2 => "2",
+        egui::Key::Num3 => "3",
+        egui::Key::Num4 => "4",
+        egui::Key::Num5 => "5",
+        egui::Key::Num6 => "6",
+        egui::Key::Num7 => "7",
+        egui::Key::Num8 => "8",
+        egui::Key::Num9 => "9",
+        egui::Key::Enter => "Enter",
+        egui::Key::Tab => "Tab",
+        egui::Key::Space => "Space",
+        egui::Key::Escape => "Escape",
+        egui::Key::Backspace => "Backspace",
+        egui::Key::Delete => "Delete",
+        egui::Key::Insert => "Insert",
+        egui::Key::Home => "Home",
+        egui::Key::End => "End",
+        egui::Key::PageUp => "PageUp",
+        egui::Key::PageDown => "PageDown",
+        egui::Key::ArrowUp => "Up",
+        egui::Key::ArrowDown => "Down",
+        egui::Key::ArrowLeft => "Left",
+        egui::Key::ArrowRight => "Right",
+        _ => return None,
+    };
+
+    parts.push(key_str);
+    Some(parts.join("+"))
 }

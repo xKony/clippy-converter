@@ -9,9 +9,7 @@ use tokio::time::sleep;
 /// Starts the background worker for fiat currency updates.
 pub async fn start_fiat_worker(db: Db, config: Config) {
     loop {
-        if let Err(e) = update_fiat_rates(&db).await {
-            eprintln!("Fiat worker error: {e:?}");
-        }
+        let _ = update_fiat_rates(&db).await;
         sleep(Duration::from_secs(config.fiat_update_interval_mins * 60)).await;
     }
 }
@@ -19,9 +17,7 @@ pub async fn start_fiat_worker(db: Db, config: Config) {
 /// Starts the background worker for cryptocurrency updates.
 pub async fn start_crypto_worker(db: Db, config: Config) {
     loop {
-        if let Err(e) = update_crypto_rates(&db).await {
-            eprintln!("Crypto worker error: {e:?}");
-        }
+        let _ = update_crypto_rates(&db).await;
         sleep(Duration::from_secs(config.crypto_update_interval_mins * 60)).await;
     }
 }
@@ -35,7 +31,6 @@ async fn update_fiat_rates(db: &Db) -> Result<()> {
     for (symbol, price) in rates {
         db.update_rate(&symbol, price, timestamp, RateSource::Fiat)?;
     }
-    println!("Fiat rates updated successfully.");
     Ok(())
 }
 
@@ -62,6 +57,5 @@ async fn update_crypto_rates(db: &Db) -> Result<()> {
             db.update_rate(symbol, price_eur, timestamp, RateSource::Crypto)?;
         }
     }
-    println!("Crypto rates updated successfully.");
     Ok(())
 }

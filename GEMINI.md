@@ -9,11 +9,13 @@
 ## 2. Exact versions
 - **Runtime:** Rust Edition 2024
 - **Package Manager:** Cargo
-- **Framework:** Iced 0.14.0
+- **Framework:** egui 0.34.1 / eframe 0.34.1
 - **Language:** Rust 2024
 - **Dependencies:**
   - `anyhow`: 1.0
-  - `iced`: 0.14.0 (features: ["tokio"])
+  - `eframe`: 0.34.1
+  - `egui`: 0.34.1
+  - `egui_extras`: 0.34.1 (features: ["svg", "image"])
   - `global-hotkey`: 0.7.0
   - `arboard`: 3.4
   - `enigo`: 0.6.1
@@ -46,9 +48,9 @@
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
-- **Rendering strategy:** Iced Elm-inspired architecture (Model-View-Update), running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates.
+- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates.
 - **Data fetching patterns:** Background tokio async workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto).
-- **State management:** Iced application state driven by `Message` enums. Shared configurations and database handles passed down to the UI thread.
+- **State management:** App state managed within the `AppState` struct, updated during the `update` loop (or `eframe`'s `update` function). Shared configurations and database handles passed down to the UI thread.
 - **Database and ORM:** `redb` (embedded key-value store) used for offline persistence of exchange rates and unit conversion factors.
 
 ## 5. Available scripts
@@ -62,7 +64,7 @@ No environment variables (`.env`) are required. All configuration is managed via
 
 ## 7. Key configuration
 - **Lints:** Extremely strict `clippy` configuration in `Cargo.toml`. `unwrap_used` and `expect_used` are denied globally except in specific, documented startup paths. `pedantic`, `nursery`, `cargo`, and `perf` are set to `deny`.
-- **UI Config:** Iced Window is configured as `transparent: true`, `decorations: false`, and `AlwaysOnTop`.
+- **UI Config:** egui Window is configured as `transparent: true`, `decorations: false`, and `AlwaysOnTop` via `ViewportBuilder`.
 
 ## 8. Development conventions
 - **Naming conventions:** Standard Rust `snake_case` for functions/variables, `PascalCase` for types.

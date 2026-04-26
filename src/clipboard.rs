@@ -92,6 +92,16 @@ impl ClipboardManager {
 
         Ok(captured_text)
     }
+
+    /// Sets the system clipboard content.
+    ///
+    /// # Errors
+    /// Returns an error if the clipboard content cannot be set.
+    pub fn set_text(&mut self, text: String) -> Result<()> {
+        self.clipboard
+            .set_text(text)
+            .context("Failed to set clipboard text")
+    }
 }
 
 #[cfg(test)]
