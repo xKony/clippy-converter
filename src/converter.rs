@@ -302,16 +302,18 @@ mod tests {
     fn test_currency_multipliers() {
         let config = Config::default();
         let db = create_test_db();
-        db.update_unit("USD", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
-        db.update_unit("EUR", 0.9, 0.0, UnitCategory::Currency, RateSource::Fiat).unwrap();
+        db.update_unit("USD", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("EUR", 0.9, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
         let converter = Converter::new(config, db);
 
         let res = converter.convert(1.5, "B USD").unwrap();
         assert_eq!(res.input_value, 1.5);
         assert_eq!(res.input_unit, "B USD");
-        
+
         let eur = res.outputs.iter().find(|o| o.unit == "EUR").unwrap();
-        // 1.5B USD -> 1,500,000,000 USD. 
+        // 1.5B USD -> 1,500,000,000 USD.
         // 1 USD = 1 Base
         // Base = 1.5e9.
         // EUR factor = 0.9.

@@ -134,10 +134,12 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         (true, Some(s)) => Some(s.to_string()),
         (false, Some(s)) => {
             // If the found unit already starts with or is the symbol's unit, don't duplicate
-            if unit_str.eq_ignore_ascii_case(s) || unit_str.to_lowercase().ends_with(s.to_lowercase().as_str()) {
-                 Some(unit_str.to_string())
+            if unit_str.eq_ignore_ascii_case(s)
+                || unit_str.to_lowercase().ends_with(s.to_lowercase().as_str())
+            {
+                Some(unit_str.to_string())
             } else {
-                 Some(format!("{unit_str} {s}"))
+                Some(format!("{unit_str} {s}"))
             }
         }
     };

@@ -347,7 +347,7 @@ impl AppState {
         }
         
         self.main_window_open = true;
-        self.main_window_was_focused = true;
+        self.main_window_was_focused = false;
         self.focus_main_input = true;
     }
 
