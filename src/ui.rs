@@ -518,8 +518,28 @@ impl AppState {
 
     #[allow(clippy::too_many_lines)]
     fn render_main_window(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let header_response = ui
-            .horizontal(|ui| {
+        // Allocate space for the header first. This allows us to add a drag interaction
+        // to the background before we add the actual interactive widgets.
+        let header_height = 32.0;
+        let (header_rect, _) = ui.allocate_at_least(
+            egui::vec2(ui.available_width(), header_height),
+            egui::Sense::hover(),
+        );
+
+        // Add the drag interaction to the background. Since it's added first,
+        // any widgets added on top of this area later will take priority for interactions.
+        let drag_response = ui.interact(
+            header_rect,
+            ui.id().with("header_drag"),
+            egui::Sense::drag(),
+        );
+        if drag_response.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        // Render the header content on top of the background drag area.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+            ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match self.current_mode {
                     WindowMode::ValueInput => {
@@ -578,17 +598,8 @@ impl AppState {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
                 });
-            })
-            .response;
-
-        let header_interact = ui.interact(
-            header_response.rect,
-            ui.id().with("header"),
-            egui::Sense::drag(),
-        );
-        if header_interact.drag_started() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
+            });
+        });
 
         ui.add_space(5.0);
 
