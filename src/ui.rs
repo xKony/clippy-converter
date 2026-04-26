@@ -176,6 +176,22 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 }
             });
 
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+
+            let mut style = (*cc.egui_ctx.global_style()).clone();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
+            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+            style.spacing.window_margin = egui::Margin::same(15);
+            cc.egui_ctx.set_global_style(style);
+
             Ok(Box::new(AppState {
                 config,
                 db,
@@ -504,28 +520,43 @@ impl AppState {
     fn render_main_window(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let header_response = ui
             .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 match self.current_mode {
                     WindowMode::ValueInput => {
-                        ui.heading("Enter number to convert");
+                        ui.label(egui::RichText::new("Enter value").strong());
                     }
                     WindowMode::SourceUnitSelection => {
-                        ui.heading("Convert ");
-                        if ui.button(format!("{:.4}", self.captured_value)).clicked() {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{:.4}", self.captured_value)).strong(),
+                            )
+                            .clicked()
+                        {
                             self.current_mode = WindowMode::ValueInput;
                             self.manual_input_value = self.captured_value.to_string();
                             self.focus_main_input = true;
                         }
-                        ui.heading(" ...");
+                        ui.label(
+                            egui::RichText::new("select unit")
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     }
                     WindowMode::Results => {
                         if let Some(res) = &self.current_result {
-                            if ui.button(format!("{:.2}", res.input_value)).clicked() {
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!("{:.2}", res.input_value)).strong(),
+                                )
+                                .clicked()
+                            {
                                 self.current_mode = WindowMode::ValueInput;
                                 self.manual_input_value = self.captured_value.to_string();
                                 self.focus_main_input = true;
                             }
-                            ui.heading(" ");
-                            if ui.button(&res.input_unit).clicked() {
+                            if ui
+                                .button(egui::RichText::new(&res.input_unit).strong())
+                                .clicked()
+                            {
                                 self.current_mode = WindowMode::SourceUnitSelection;
                                 self.search_query.clear();
                                 self.search_query_lower.clear();
@@ -534,8 +565,15 @@ impl AppState {
                         }
                     }
                 }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("×").clicked() {
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(egui::include_image!("../icons/close.svg"))
+                                .tint(ui.visuals().text_color()),
+                        ))
+                        .clicked()
+                    {
                         self.main_window_open = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
@@ -552,36 +590,48 @@ impl AppState {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
-        ui.add_space(10.0);
+        ui.add_space(5.0);
 
         if self.current_mode == WindowMode::ValueInput {
-            let response = ui.text_edit_singleline(&mut self.manual_input_value);
-            if self.focus_main_input {
-                response.request_focus();
-                self.focus_main_input = false;
-            }
-            if response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                && let Ok(val) = self.manual_input_value.parse::<f64>()
-            {
-                self.captured_value = val;
-                self.current_mode = WindowMode::SourceUnitSelection;
-                self.search_query.clear();
-                self.search_query_lower.clear();
-                self.focus_main_input = true;
-            }
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.manual_input_value)
+                        .hint_text("0.00")
+                        .font(egui::TextStyle::Heading)
+                        .desired_width(f32::INFINITY),
+                );
+                if self.focus_main_input {
+                    response.request_focus();
+                    self.focus_main_input = false;
+                }
+                if ((response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    && let Ok(val) = self.manual_input_value.parse::<f64>()
+                {
+                    self.captured_value = val;
+                    self.current_mode = WindowMode::SourceUnitSelection;
+                    self.search_query.clear();
+                    self.search_query_lower.clear();
+                    self.focus_main_input = true;
+                }
+            });
         } else {
-            let response = ui.text_edit_singleline(&mut self.search_query);
-            if response.changed() {
-                self.search_query_lower = self.search_query.to_lowercase();
-            }
-            if self.focus_main_input {
-                response.request_focus();
-                self.focus_main_input = false;
-            }
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Search units...")
+                        .desired_width(f32::INFINITY),
+                );
+                if response.changed() {
+                    self.search_query_lower = self.search_query.to_lowercase();
+                }
+                if self.focus_main_input {
+                    response.request_focus();
+                    self.focus_main_input = false;
+                }
 
-            if self.current_mode == WindowMode::SourceUnitSelection {
-                if response.lost_focus()
+                if self.current_mode == WindowMode::SourceUnitSelection
+                    && response.lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && !self.search_query_lower.is_empty()
                 {
@@ -611,7 +661,11 @@ impl AppState {
                         self.focus_main_input = true;
                     }
                 }
+            });
 
+            ui.add_space(5.0);
+
+            if self.current_mode == WindowMode::SourceUnitSelection {
                 let all_units = self.converter.get_all_units().unwrap_or_default();
                 let matching_units: Vec<_> = all_units
                     .into_iter()
@@ -624,29 +678,39 @@ impl AppState {
                     .take(self.config.list_size)
                     .collect();
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for unit in matching_units {
-                        let aliases_str = if unit.aliases.is_empty() {
-                            String::new()
-                        } else {
-                            format!("({})", unit.aliases.join(", "))
-                        };
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            for unit in matching_units {
+                                let aliases_str = if unit.aliases.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", unit.aliases.join(", "))
+                                };
 
-                        if ui
-                            .button(format!("{} {}", unit.symbol, aliases_str))
-                            .clicked()
-                            && let Ok(result) =
-                                self.converter.convert(self.captured_value, &unit.symbol)
-                        {
-                            self.current_result = Some(result);
-                            self.current_mode = WindowMode::Results;
-                            self.search_query.clear();
-                            self.search_query_lower.clear();
-                            self.log_conversion_if_enabled();
-                            self.focus_main_input = true;
-                        }
-                    }
-                });
+                                let button_text =
+                                    egui::RichText::new(format!("{} {}", unit.symbol, aliases_str));
+                                if ui
+                                    .add(
+                                        egui::Button::new(button_text)
+                                            .fill(egui::Color32::TRANSPARENT),
+                                    )
+                                    .clicked()
+                                    && let Ok(result) =
+                                        self.converter.convert(self.captured_value, &unit.symbol)
+                                {
+                                    self.current_result = Some(result);
+                                    self.current_mode = WindowMode::Results;
+                                    self.search_query.clear();
+                                    self.search_query_lower.clear();
+                                    self.log_conversion_if_enabled();
+                                    self.focus_main_input = true;
+                                }
+                            }
+                        });
+                    });
             } else if self.current_mode == WindowMode::Results {
                 let outputs = if let Some(result) = &self.current_result {
                     result
@@ -661,50 +725,104 @@ impl AppState {
                 };
 
                 if !outputs.is_empty() {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for output in outputs {
-                            let is_favorite = self.config.favorites.contains(&output.unit);
-                            let favorite_label = if is_favorite { "★" } else { "☆" };
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                for output in outputs {
+                                    let is_favorite = self.config.favorites.contains(&output.unit);
+                                    let favorite_icon =
+                                        egui::include_image!("../icons/favorite.svg"); // TODO: use outline icon if available
+                                    let tint = if is_favorite {
+                                        egui::Color32::from_rgb(255, 215, 0)
+                                    } else {
+                                        ui.visuals().text_color()
+                                    };
 
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{:.4}", output.value));
-                                ui.label(&output.unit);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button(favorite_label).clicked() {
-                                            if let Some(pos) = self
-                                                .config
-                                                .favorites
-                                                .iter()
-                                                .position(|f| f == &output.unit)
-                                            {
-                                                self.config.favorites.remove(pos);
-                                            } else {
-                                                self.config.favorites.push(output.unit.clone());
-                                            }
-                                            let _ = self.config.save();
-                                            self.converter = Converter::new(
-                                                self.config.clone(),
-                                                self.db.clone(),
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("{:.4}", output.value))
+                                                    .strong()
+                                                    .size(18.0),
                                             );
-                                        }
-                                        if ui.button("⇌").clicked()
-                                            && let Ok(new_res) =
-                                                self.converter.convert(output.value, &output.unit)
-                                        {
-                                            self.current_result = Some(new_res);
-                                            self.captured_value = output.value;
-                                            self.search_query.clear();
-                                            self.search_query_lower.clear();
-                                            self.log_conversion_if_enabled();
-                                            self.focus_main_input = true;
-                                        }
-                                    },
-                                );
+                                            ui.label(
+                                                egui::RichText::new(&output.unit)
+                                                    .size(14.0)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(favorite_icon).tint(tint),
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if let Some(pos) = self
+                                                        .config
+                                                        .favorites
+                                                        .iter()
+                                                        .position(|f| f == &output.unit)
+                                                    {
+                                                        self.config.favorites.remove(pos);
+                                                    } else {
+                                                        self.config
+                                                            .favorites
+                                                            .push(output.unit.clone());
+                                                    }
+                                                    let _ = self.config.save();
+                                                    self.converter = Converter::new(
+                                                        self.config.clone(),
+                                                        self.db.clone(),
+                                                    );
+                                                }
+
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(egui::include_image!(
+                                                            "../icons/switch.svg"
+                                                        ))
+                                                        .tint(ui.visuals().text_color()),
+                                                    ))
+                                                    .clicked()
+                                                    && let Ok(new_res) = self
+                                                        .converter
+                                                        .convert(output.value, &output.unit)
+                                                {
+                                                    self.current_result = Some(new_res);
+                                                    self.captured_value = output.value;
+                                                    self.search_query.clear();
+                                                    self.search_query_lower.clear();
+                                                    self.log_conversion_if_enabled();
+                                                    self.focus_main_input = true;
+                                                }
+
+                                                if ui
+                                                    .add(egui::Button::image(
+                                                        egui::Image::new(egui::include_image!(
+                                                            "../icons/copy.svg"
+                                                        ))
+                                                        .tint(ui.visuals().text_color()),
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    let _ = self
+                                                        .clipboard
+                                                        .set_text(output.value.to_string());
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.separator();
+                                }
                             });
-                        }
-                    });
+                        });
                 }
             }
         }
