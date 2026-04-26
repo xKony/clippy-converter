@@ -732,8 +732,12 @@ impl AppState {
                             ui.vertical(|ui| {
                                 for output in outputs {
                                     let is_favorite = self.config.favorites.contains(&output.unit);
-                                    let favorite_icon =
-                                        egui::include_image!("../icons/favorite.svg"); // TODO: use outline icon if available
+                                    let favorite_icon = if is_favorite {
+                                        egui::include_image!("../icons/favorite_on.svg")
+                                    } else {
+                                        egui::include_image!("../icons/favorite.svg")
+                                    };
+
                                     let tint = if is_favorite {
                                         egui::Color32::from_rgb(255, 215, 0)
                                     } else {
