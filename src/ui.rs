@@ -8,6 +8,7 @@ use eframe::egui;
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -65,6 +66,8 @@ pub struct AppState {
 
     pub focus_main_input: bool,
     pub main_window_was_focused: bool,
+
+    pub copied_notification: Option<(String, Instant)>,
 
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
@@ -219,6 +222,8 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
                 focus_main_input: false,
                 main_window_was_focused: false,
+
+                copied_notification: None,
 
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
@@ -827,9 +832,20 @@ impl AppState {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    let _ = self
-                                                        .clipboard
-                                                        .set_text(output.value.to_string());
+                                                    if output.value.is_nan() || output.value.is_infinite() {
+                                                        self.copied_notification = Some((
+                                                            "Invalid value".to_string(),
+                                                            Instant::now(),
+                                                        ));
+                                                    } else {
+                                                        let val_str = output.value.to_string();
+                                                        if self.clipboard.set_text(val_str).is_ok() {
+                                                            self.copied_notification = Some((
+                                                                "Copied!".to_string(),
+                                                                Instant::now(),
+                                                            ));
+                                                        }
+                                                    }
                                                 }
                                             },
                                         );
@@ -839,6 +855,25 @@ impl AppState {
                             });
                         });
                 }
+            }
+        }
+
+        if let Some((msg, time)) = &self.copied_notification {
+            if Instant::now().duration_since(*time) > Duration::from_secs(2) {
+                self.copied_notification = None;
+            } else {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(msg)
+                            .color(if msg == "Copied!" {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::RED
+                            })
+                            .strong(),
+                    );
+                });
+                ctx.request_repaint();
             }
         }
     }
