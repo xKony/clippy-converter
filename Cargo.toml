@@ -10,7 +10,6 @@ categories = ["development-tools"]
 
 [dependencies]
 anyhow = "1.0"
-iced = { version = "0.14.0", features = ["tokio"] }
 global-hotkey = "0.7.0"
 arboard = "3.4"
 enigo = "0.6.1"
@@ -25,6 +24,8 @@ chrono = { version = "0.4", features = ["serde"] }
 tray-icon = "0.19"
 open = "5.3"
 single-instance = "0.3.3"
+eframe = "0.34.1"
+egui = "0.34.1"
 
 [dev-dependencies]
 tempfile = "3.10"

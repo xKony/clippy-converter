@@ -42,18 +42,5 @@ fn main() -> Result<()> {
         eprintln!("Failed to initialize static units: {e}");
     }
 
-    iced::daemon(
-        move || {
-            ui::boot(ui::BootParams {
-                config: config.clone(),
-                db: db.clone(),
-            })
-        },
-        ui::update,
-        ui::view,
-    )
-    .subscription(ui::subscription)
-    .run()?;
-
-    Ok(())
+    ui::run(config, db)
 }
