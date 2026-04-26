@@ -456,30 +456,29 @@ impl AppState {
 
         ui.checkbox(&mut self.config.history_enabled, "Enable History Logging");
         if self.config.history_enabled {
-            egui::ComboBox::from_label("Retention Period")
-                .selected_text(self.config.history_retention.to_string())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.config.history_retention,
-                        HistoryRetention::SevenDays,
-                        "7 Days",
-                    );
-                    ui.selectable_value(
-                        &mut self.config.history_retention,
-                        HistoryRetention::ThirtyDays,
-                        "30 Days",
-                    );
-                    ui.selectable_value(
-                        &mut self.config.history_retention,
-                        HistoryRetention::OneYear,
-                        "1 Year",
-                    );
-                    ui.selectable_value(
-                        &mut self.config.history_retention,
-                        HistoryRetention::Never,
-                        "Never",
-                    );
-                });
+            ui.horizontal(|ui| {
+                ui.label("Retention:");
+                ui.selectable_value(
+                    &mut self.config.history_retention,
+                    HistoryRetention::SevenDays,
+                    "7d",
+                );
+                ui.selectable_value(
+                    &mut self.config.history_retention,
+                    HistoryRetention::ThirtyDays,
+                    "30d",
+                );
+                ui.selectable_value(
+                    &mut self.config.history_retention,
+                    HistoryRetention::OneYear,
+                    "1y",
+                );
+                ui.selectable_value(
+                    &mut self.config.history_retention,
+                    HistoryRetention::Never,
+                    "Never",
+                );
+            });
         }
 
         if ui.button("Open History Folder").clicked()
