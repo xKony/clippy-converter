@@ -89,7 +89,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_visible(false)
-            .with_taskbar(false),
+            .with_taskbar(false)
+            .with_decorations(false)
+            .with_transparent(true),
         run_and_return: false,
         ..Default::default()
     };
@@ -100,12 +102,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let hotkey_manager =
         GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
     let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
-    if let Err(e) = hotkey_manager.register(hk) {
-        eprintln!(
-            "Warning: Failed to register hotkey {}: {}",
-            config.hotkey, e
-        );
-    }
+    let _ = hotkey_manager.register(hk);
 
     let tray_menu = Menu::with_items(&[
         &MenuItem::with_id("settings", "Settings", true, None),
@@ -145,7 +142,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     });
 
     eframe::run_native(
-        "Clippy Converter",
+        "Clippy Converter Daemon",
         options,
         Box::new(move |cc| {
             let tx_hk = tx.clone();
@@ -245,6 +242,9 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ensure the root window remains hidden
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {

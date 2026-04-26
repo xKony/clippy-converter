@@ -15,7 +15,6 @@ use anyhow::{Context, Result};
 use db::Db;
 use models::Config;
 use single_instance::SingleInstance;
-use std::process;
 
 fn main() -> Result<()> {
     // Ensure only one instance is running
@@ -23,25 +22,16 @@ fn main() -> Result<()> {
         .context("Failed to create single instance lock")?;
 
     if !instance.is_single() {
-        eprintln!("Another instance of Clippy Converter is already running. Exiting.");
-        process::exit(1);
+        return Err(anyhow::anyhow!("Another instance of Clippy Converter is already running. Exiting."));
     }
-
-    println!("Clippy Converter starting...");
 
     let config = Config::load().unwrap_or_default();
 
-    let db = match Db::open() {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("Failed to open database: {e}");
-            eprintln!("Check if another process is using the database file.");
-            process::exit(1);
-        }
-    };
+    let db = Db::open().context("Failed to open database. Check if another process is using the database file.")?;
 
     if let Err(e) = db.init_static_units() {
-        eprintln!("Failed to initialize static units: {e}");
+        // We can keep this as a silent error or use a log, but avoiding eprintln for now
+        let _ = e;
     }
 
     ui::run(config, db)
