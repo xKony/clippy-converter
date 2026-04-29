@@ -93,7 +93,8 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
-            .with_inner_size([350.0, 400.0]),
+            .with_resizable(false)
+            .with_inner_size([350.0, 80.0]),
         run_and_return: false,
         vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
@@ -292,17 +293,28 @@ impl AppState {
             return;
         }
 
-        let popup_frame = egui::Frame {
-            fill: egui::Color32::from_rgba_unmultiplied(18, 18, 18, 240),
-            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45)),
-            corner_radius: egui::CornerRadius::same(12),
-            inner_margin: egui::Margin::same(20),
+        // Fill the entire viewport with the popup background color.
+        // We set it on the panel directly since wgpu per-pixel transparency
+        // is unreliable on Windows — this avoids black areas and corners.
+        let bg_color = egui::Color32::from_rgb(30, 30, 30);
+        ui.painter()
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
+
+        // Add padding via a frame with no extra fill
+        let content_frame = egui::Frame {
+            fill: egui::Color32::TRANSPARENT,
+            inner_margin: egui::Margin::same(16),
             ..Default::default()
         };
 
-        popup_frame.show(ui, |ui| {
+        let response = content_frame.show(ui, |ui| {
             self.render_main_window(ui, ctx);
         });
+
+        // Auto-resize the window to match the actual content height
+        let content_size = response.response.rect.size();
+        let desired_size = egui::vec2(350.0, content_size.y);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired_size));
 
         ctx.request_repaint();
     }
@@ -578,6 +590,7 @@ impl AppState {
                     if ui
                         .add(egui::Button::image(
                             egui::Image::new(egui::include_image!("../icons/close.svg"))
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .tint(ui.visuals().text_color()),
                         ))
                         .clicked()
