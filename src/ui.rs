@@ -91,8 +91,14 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_visible(false)
             .with_taskbar(false)
             .with_decorations(false)
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_resizable(false)
+            .with_inner_size([350.0, 420.0]),
         run_and_return: false,
+        vsync: true,
+        hardware_acceleration: eframe::HardwareAcceleration::Required,
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
@@ -178,19 +184,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
-            let mut style = (*cc.egui_ctx.global_style()).clone();
-            style
-                .text_styles
-                .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
-            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-            style.spacing.window_margin = egui::Margin::same(15);
-            cc.egui_ctx.set_global_style(style);
+            crate::theme::apply_theme(&cc.egui_ctx);
 
             Ok(Box::new(AppState {
                 config,
@@ -231,20 +225,18 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 }
 
 impl eframe::App for AppState {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.run_logic(ctx, frame);
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Handled via update
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.run_logic(&ctx, frame, ui);
     }
 }
 
 impl AppState {
-    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Ensure the root window remains hidden
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-
+    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame, ui: &mut egui::Ui) {
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
@@ -259,6 +251,7 @@ impl AppState {
             }
         }
 
+        // Settings as a child viewport (has its own title bar and decorations)
         if self.settings_window_open {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings"),
@@ -277,48 +270,49 @@ impl AppState {
             );
         }
 
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("main"),
-            egui::ViewportBuilder::default()
-                .with_title("Clippy Converter")
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_visible(false)
-                .with_inner_size([350.0, 400.0])
-                .with_position(self.main_window_pos),
-            |ctx, _class| {
-                if !self.main_window_open {
-                    return;
-                }
+        // The main converter popup is the ROOT viewport itself.
+        // When not open, hide it. When open, render the converter UI.
+        if !self.main_window_open {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
 
-                let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-                if !focused && self.main_window_was_focused {
-                    self.main_window_open = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-                self.main_window_was_focused = focused;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    self.main_window_open = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        if !focused && self.main_window_was_focused {
+            self.main_window_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
+        self.main_window_was_focused = focused;
 
-                let frame = egui::Frame {
-                    fill: egui::Color32::from_rgba_unmultiplied(30, 30, 30, 250),
-                    stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
-                    corner_radius: egui::CornerRadius::same(12),
-                    inner_margin: egui::Margin::same(20),
-                    ..Default::default()
-                };
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.main_window_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
 
-                #[allow(deprecated)]
-                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-                    self.render_main_window(ui, ctx);
-                });
-            },
-        );
+        // Fill the entire viewport with the popup background color.
+        // We set it on the panel directly since wgpu per-pixel transparency
+        // is unreliable on Windows — this avoids black areas and corners.
+        let bg_color = egui::Color32::from_rgb(30, 30, 30);
+        ui.painter()
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
+
+        // Add padding via a frame with no extra fill
+        let content_frame = egui::Frame {
+            fill: egui::Color32::TRANSPARENT,
+            inner_margin: egui::Margin::same(16),
+            ..Default::default()
+        };
+
+        content_frame.show(ui, |ui| {
+            self.render_main_window(ui, ctx);
+        });
+
+
+        ctx.request_repaint();
     }
 
     #[expect(
@@ -398,13 +392,10 @@ impl AppState {
         self.main_window_was_focused = false;
         self.focus_main_input = true;
 
-        let main_viewport_id = egui::ViewportId::from_hash_of("main");
-        ctx.send_viewport_cmd_to(
-            main_viewport_id,
-            egui::ViewportCommand::OuterPosition(self.main_window_pos),
-        );
-        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Focus);
+        // The converter popup is the root viewport — send commands to ROOT
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -594,6 +585,7 @@ impl AppState {
                     if ui
                         .add(egui::Button::image(
                             egui::Image::new(egui::include_image!("../icons/close.svg"))
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .tint(ui.visuals().text_color()),
                         ))
                         .clicked()
@@ -831,14 +823,17 @@ impl AppState {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    if output.value.is_nan() || output.value.is_infinite() {
+                                                    if output.value.is_nan()
+                                                        || output.value.is_infinite()
+                                                    {
                                                         self.copied_notification = Some((
                                                             "Invalid value".to_string(),
                                                             Instant::now(),
                                                         ));
                                                     } else {
                                                         let val_str = output.value.to_string();
-                                                        if self.clipboard.set_text(val_str).is_ok() {
+                                                        if self.clipboard.set_text(val_str).is_ok()
+                                                        {
                                                             self.copied_notification = Some((
                                                                 "Copied!".to_string(),
                                                                 Instant::now(),
