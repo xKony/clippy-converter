@@ -93,6 +93,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_decorations(false)
             .with_transparent(true),
         run_and_return: false,
+        vsync: true,
+        hardware_acceleration: eframe::HardwareAcceleration::Required,
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
@@ -178,19 +181,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
-            let mut style = (*cc.egui_ctx.global_style()).clone();
-            style
-                .text_styles
-                .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
-            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-            style.spacing.window_margin = egui::Margin::same(15);
-            cc.egui_ctx.set_global_style(style);
+            crate::theme::apply_theme(&cc.egui_ctx);
 
             Ok(Box::new(AppState {
                 config,
@@ -242,9 +233,6 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Ensure the root window remains hidden
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
@@ -285,9 +273,8 @@ impl AppState {
                 .with_transparent(true)
                 .with_always_on_top()
                 .with_taskbar(false)
-                .with_visible(false)
-                .with_inner_size([350.0, 400.0])
-                .with_position(self.main_window_pos),
+                .with_visible(self.main_window_open)
+                .with_inner_size([350.0, 400.0]),
             |ctx, _class| {
                 if !self.main_window_open {
                     return;
@@ -306,8 +293,8 @@ impl AppState {
                 }
 
                 let frame = egui::Frame {
-                    fill: egui::Color32::from_rgba_unmultiplied(30, 30, 30, 250),
-                    stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
+                    fill: egui::Color32::from_rgba_unmultiplied(18, 18, 18, 240),
+                    stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45)),
                     corner_radius: egui::CornerRadius::same(12),
                     inner_margin: egui::Margin::same(20),
                     ..Default::default()
@@ -319,6 +306,10 @@ impl AppState {
                 });
             },
         );
+
+        if self.main_window_open {
+            ctx.request_repaint();
+        }
     }
 
     #[expect(
@@ -832,14 +823,17 @@ impl AppState {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    if output.value.is_nan() || output.value.is_infinite() {
+                                                    if output.value.is_nan()
+                                                        || output.value.is_infinite()
+                                                    {
                                                         self.copied_notification = Some((
                                                             "Invalid value".to_string(),
                                                             Instant::now(),
                                                         ));
                                                     } else {
                                                         let val_str = output.value.to_string();
-                                                        if self.clipboard.set_text(val_str).is_ok() {
+                                                        if self.clipboard.set_text(val_str).is_ok()
+                                                        {
                                                             self.copied_notification = Some((
                                                                 "Copied!".to_string(),
                                                                 Instant::now(),
