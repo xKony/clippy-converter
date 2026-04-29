@@ -94,7 +94,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(false)
-            .with_inner_size([350.0, 80.0]),
+            .with_inner_size([350.0, 420.0]),
         run_and_return: false,
         vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
@@ -307,14 +307,10 @@ impl AppState {
             ..Default::default()
         };
 
-        let response = content_frame.show(ui, |ui| {
+        content_frame.show(ui, |ui| {
             self.render_main_window(ui, ctx);
         });
 
-        // Auto-resize the window to match the actual content height
-        let content_size = response.response.rect.size();
-        let desired_size = egui::vec2(350.0, content_size.y);
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired_size));
 
         ctx.request_repaint();
     }
