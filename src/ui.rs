@@ -91,7 +91,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_visible(false)
             .with_taskbar(false)
             .with_decorations(false)
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_inner_size([350.0, 400.0]),
         run_and_return: false,
         vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
@@ -222,17 +224,18 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 }
 
 impl eframe::App for AppState {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.run_logic(ctx, frame);
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Handled via update
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.run_logic(&ctx, frame, ui);
     }
 }
 
 impl AppState {
-    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame, ui: &mut egui::Ui) {
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
@@ -247,6 +250,7 @@ impl AppState {
             }
         }
 
+        // Settings as a child viewport (has its own title bar and decorations)
         if self.settings_window_open {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings"),
@@ -265,51 +269,42 @@ impl AppState {
             );
         }
 
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("main"),
-            egui::ViewportBuilder::default()
-                .with_title("Clippy Converter")
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_visible(self.main_window_open)
-                .with_inner_size([350.0, 400.0]),
-            |ctx, _class| {
-                if !self.main_window_open {
-                    return;
-                }
-
-                let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-                if !focused && self.main_window_was_focused {
-                    self.main_window_open = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-                self.main_window_was_focused = focused;
-
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    self.main_window_open = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-
-                let frame = egui::Frame {
-                    fill: egui::Color32::from_rgba_unmultiplied(18, 18, 18, 240),
-                    stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45)),
-                    corner_radius: egui::CornerRadius::same(12),
-                    inner_margin: egui::Margin::same(20),
-                    ..Default::default()
-                };
-
-                #[allow(deprecated)]
-                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-                    self.render_main_window(ui, ctx);
-                });
-            },
-        );
-
-        if self.main_window_open {
-            ctx.request_repaint();
+        // The main converter popup is the ROOT viewport itself.
+        // When not open, hide it. When open, render the converter UI.
+        if !self.main_window_open {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
         }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        if !focused && self.main_window_was_focused {
+            self.main_window_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
+        self.main_window_was_focused = focused;
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.main_window_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
+
+        let popup_frame = egui::Frame {
+            fill: egui::Color32::from_rgba_unmultiplied(18, 18, 18, 240),
+            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45)),
+            corner_radius: egui::CornerRadius::same(12),
+            inner_margin: egui::Margin::same(20),
+            ..Default::default()
+        };
+
+        popup_frame.show(ui, |ui| {
+            self.render_main_window(ui, ctx);
+        });
+
+        ctx.request_repaint();
     }
 
     #[expect(
@@ -389,13 +384,10 @@ impl AppState {
         self.main_window_was_focused = false;
         self.focus_main_input = true;
 
-        let main_viewport_id = egui::ViewportId::from_hash_of("main");
-        ctx.send_viewport_cmd_to(
-            main_viewport_id,
-            egui::ViewportCommand::OuterPosition(self.main_window_pos),
-        );
-        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd_to(main_viewport_id, egui::ViewportCommand::Focus);
+        // The converter popup is the root viewport — send commands to ROOT
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     #[allow(clippy::too_many_lines)]
