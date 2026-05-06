@@ -6,10 +6,12 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 /// # Errors
 /// Returns an error if the hotkey string is invalid or contains unknown keys/modifiers.
 pub fn parse_hotkey(s: &str) -> Result<HotKey> {
-    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
-    if parts.is_empty() {
+    let s = s.trim();
+    if s.is_empty() {
         return Err(anyhow!("Empty hotkey string"));
     }
+
+    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
 
     let mut modifiers = Modifiers::empty();
     let mut code = None;
