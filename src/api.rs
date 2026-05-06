@@ -18,7 +18,7 @@ struct FawazAhmedResponse {
 
 /// Internal struct for parsing a single Binance ticker price.
 #[derive(Debug, Deserialize)]
-pub struct BinanceTicker {
+pub(crate) struct BinanceTicker {
     /// The pair symbol (e.g., "BTCUSDT").
     pub symbol: String,
     /// The current price as a string.
@@ -54,7 +54,7 @@ pub async fn fetch_fiat_rates() -> Result<HashMap<String, f64>> {
 ///
 /// # Errors
 /// Returns an error if the network request fails or the response cannot be parsed.
-pub async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
+pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
     let tickers: Vec<BinanceTicker> = reqwest::get(BINANCE_API_URL)
         .await
         .context("Failed to connect to Binance API")?
