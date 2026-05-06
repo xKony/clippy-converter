@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use enigo::{Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -101,6 +101,14 @@ impl ClipboardManager {
         self.clipboard
             .set_text(text)
             .context("Failed to set clipboard text")
+    }
+
+    /// Returns the current mouse cursor position as `(x, y)`.
+    ///
+    /// Falls back to `(100, 100)` if the position cannot be determined.
+    #[must_use]
+    pub fn cursor_position(&self) -> (i32, i32) {
+        self.enigo.location().unwrap_or((100, 100))
     }
 }
 

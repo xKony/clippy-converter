@@ -6,7 +6,6 @@ use crate::models::{Config, ConversionResult, HistoryRetention};
 use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
 use eframe::egui;
-use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -55,7 +54,6 @@ pub struct AppState {
     pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
-    pub enigo: Enigo,
     pub hotkey_manager: GlobalHotKeyManager,
     pub hotkey_id: global_hotkey::hotkey::HotKey,
     pub tray_icon: TrayIcon,
@@ -117,7 +115,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let converter = Converter::new(config.clone(), db.clone());
     let clipboard = ClipboardManager::new().context("Failed to initialize clipboard")?;
-    let enigo = Enigo::new(&EnigoSettings::default()).context("Failed to initialize enigo")?;
     let hotkey_manager =
         GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
     let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
@@ -227,7 +224,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 db,
                 converter,
                 clipboard,
-                enigo,
                 hotkey_manager,
                 hotkey_id: hk,
                 tray_icon,
@@ -422,7 +418,7 @@ impl AppState {
         self.search_query = String::new();
         self.search_query_lower = String::new();
 
-        let (x, y) = self.enigo.location().unwrap_or((100, 100));
+        let (x, y) = self.clipboard.cursor_position();
 
         #[expect(
             clippy::cast_precision_loss,
