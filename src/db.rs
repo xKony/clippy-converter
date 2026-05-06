@@ -339,6 +339,7 @@ impl Db {
 }
 
 /// Helper to add a unit and its variations to the database.
+/// Skips insertion if the unit already exists to avoid overwriting on every launch.
 fn add_unit_static(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
@@ -348,18 +349,27 @@ fn add_unit_static(
     offset: f64,
     variations: &[&str],
 ) -> Result<()> {
-    units
-        .insert(
-            sym,
-            UnitEntry {
-                factor,
-                offset,
-                category: cat as u8,
-                timestamp: 0,
-                source: RateSource::Static as u8,
-            },
-        )
-        .context("Failed to insert static unit")?;
+    // Only insert if the unit doesn't already exist
+    let exists = units
+        .get(sym)
+        .context("Failed to check existing unit")?
+        .is_some();
+
+    if !exists {
+        units
+            .insert(
+                sym,
+                UnitEntry {
+                    factor,
+                    offset,
+                    category: cat as u8,
+                    timestamp: 0,
+                    source: RateSource::Static as u8,
+                },
+            )
+            .context("Failed to insert static unit")?;
+    }
+
     for v in variations {
         aliases.insert(*v, sym).context("Failed to insert alias")?;
         aliases
