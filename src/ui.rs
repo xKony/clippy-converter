@@ -3,6 +3,7 @@ use crate::converter::Converter;
 use crate::db::Db;
 use crate::hotkey;
 use crate::models::{Config, ConversionResult, HistoryRetention};
+use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
 use eframe::egui;
 use enigo::{Enigo, Mouse, Settings as EnigoSettings};
@@ -41,6 +42,7 @@ impl std::fmt::Display for HistoryRetention {
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     pub config: Config,
+    pub shared_config: SharedConfig,
     pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
@@ -127,12 +129,15 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
 
+    let shared_config: SharedConfig =
+        std::sync::Arc::new(std::sync::RwLock::new(config.clone()));
+
     // Spawn tokio runtime for background workers
     std::thread::spawn({
         let db_fiat = db.clone();
-        let config_fiat = config.clone();
+        let config_fiat = shared_config.clone();
         let db_crypto = db.clone();
-        let config_crypto = config.clone();
+        let config_crypto = shared_config.clone();
 
         move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -188,6 +193,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
             Ok(Box::new(AppState {
                 config,
+                shared_config,
                 db,
                 converter,
                 clipboard,
@@ -251,23 +257,44 @@ impl AppState {
             }
         }
 
-        // Settings as a child viewport (has its own title bar and decorations)
+        // Settings rendered as an egui::Window inside the root viewport.
+        // NOTE: show_viewport_immediate is NOT supported by the wgpu renderer
+        // and will panic. Using an egui::Window avoids spawning a child OS window.
         if self.settings_window_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("settings"),
-                egui::ViewportBuilder::default()
-                    .with_title("Settings")
-                    .with_inner_size([400.0, 500.0]),
-                |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        self.settings_window_open = false;
-                    }
-                    #[allow(deprecated)]
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        self.render_settings(ui, ctx);
-                    });
-                },
-            );
+            // Ensure the root viewport is visible so the settings window can be seen
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            // Resize root viewport to fit settings content
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 500.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title("Clippy Converter - Settings".into()));
+
+            // Paint a solid background to cover the transparent root viewport
+            let bg_color = egui::Color32::from_rgb(24, 24, 24);
+            ui.painter()
+                .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
+
+            let content_frame = egui::Frame {
+                fill: egui::Color32::TRANSPARENT,
+                inner_margin: egui::Margin::same(16),
+                ..Default::default()
+            };
+            content_frame.show(ui, |ui| {
+                self.render_settings(ui, ctx);
+            });
+
+            // Check if user closed the window via OS close button
+            if ctx.input(|i| i.viewport().close_requested()) {
+                self.settings_window_open = false;
+                // Cancel the close so the daemon keeps running
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // Restore the root viewport to its converter configuration
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(350.0, 420.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+
+            return;
         }
 
         // The main converter popup is the ROOT viewport itself.
@@ -277,6 +304,8 @@ impl AppState {
             return;
         }
 
+        // Ensure converter mode viewport settings are applied
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
@@ -485,6 +514,7 @@ impl AppState {
         ui.horizontal(|ui| {
             ui.label("Fiat:");
             ui.text_edit_singleline(&mut self.config_fiat_interval_str);
+            ui.separator();
             ui.label("Crypto:");
             ui.text_edit_singleline(&mut self.config_crypto_interval_str);
         });
@@ -501,6 +531,10 @@ impl AppState {
                 self.config.hotkey = recorded;
             }
             let _ = self.config.save();
+            // Propagate changes to background workers
+            if let Ok(mut shared) = self.shared_config.write() {
+                *shared = self.config.clone();
+            }
             if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
                 && hk != self.hotkey_id
             {
