@@ -263,14 +263,14 @@ impl eframe::App for AppState {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.run_logic(&ctx, frame, ui);
+        self.run_logic(&ctx, ui);
     }
 }
 
 impl AppState {
-    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame, ui: &mut egui::Ui) {
+    fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
