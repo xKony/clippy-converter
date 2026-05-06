@@ -28,6 +28,15 @@ pub enum EventMsg {
     Exit,
 }
 
+/// Payload sent over the history logging channel to the background runtime.
+pub struct HistoryLogEntry {
+    pub input_value: f64,
+    pub input_unit: String,
+    pub output_value: f64,
+    pub output_unit: String,
+    pub retention_days: Option<i64>,
+}
+
 impl std::fmt::Display for HistoryRetention {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -73,6 +82,8 @@ pub struct AppState {
 
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
+
+    pub history_tx: tokio::sync::mpsc::UnboundedSender<HistoryLogEntry>,
 }
 
 /// Runs the eframe application.
@@ -132,6 +143,10 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let shared_config: SharedConfig =
         std::sync::Arc::new(std::sync::RwLock::new(config.clone()));
 
+    // Channel for sending history log entries to the background runtime
+    let (history_tx, mut history_rx) =
+        tokio::sync::mpsc::unbounded_channel::<HistoryLogEntry>();
+
     // Spawn tokio runtime for background workers
     std::thread::spawn({
         let db_fiat = db.clone();
@@ -147,6 +162,21 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                     db_crypto,
                     config_crypto,
                 ));
+
+                // History log receiver — processes entries from the UI thread
+                tokio::spawn(async move {
+                    while let Some(entry) = history_rx.recv().await {
+                        let _ = crate::history::log_conversion(
+                            entry.input_value,
+                            &entry.input_unit,
+                            entry.output_value,
+                            &entry.output_unit,
+                            entry.retention_days,
+                        )
+                        .await;
+                    }
+                });
+
                 std::future::pending::<()>().await;
             });
         }
@@ -224,6 +254,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
+                history_tx,
             }))
         }),
     )
@@ -344,33 +375,17 @@ impl AppState {
         ctx.request_repaint();
     }
 
-    #[expect(
-        clippy::unwrap_used,
-        reason = "tokio runtime creation in simple thread is expected to succeed"
-    )]
     fn log_conversion_if_enabled(&self) {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
             && let Some(first_output) = result.outputs.first()
         {
-            let input_val = result.input_value;
-            let input_unit = result.input_unit.clone();
-            let out_val = first_output.value;
-            let out_unit = first_output.unit.clone();
-            let retention = self.config.history_retention;
-
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async move {
-                    let _ = crate::history::log_conversion(
-                        input_val,
-                        &input_unit,
-                        out_val,
-                        &out_unit,
-                        retention.to_days(),
-                    )
-                    .await;
-                });
+            let _ = self.history_tx.send(HistoryLogEntry {
+                input_value: result.input_value,
+                input_unit: result.input_unit.clone(),
+                output_value: first_output.value,
+                output_unit: first_output.unit.clone(),
+                retention_days: self.config.history_retention.to_days(),
             });
         }
     }
