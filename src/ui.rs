@@ -56,6 +56,7 @@ pub struct AppState {
     pub clipboard: ClipboardManager,
     pub hotkey_manager: GlobalHotKeyManager,
     pub hotkey_id: global_hotkey::hotkey::HotKey,
+    /// Held alive to keep the OS tray icon visible. Dropping this removes the icon.
     pub tray_icon: TrayIcon,
     pub event_rx: Receiver<EventMsg>,
 
