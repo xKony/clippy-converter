@@ -514,6 +514,12 @@ fn init_temperature_units(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
 ) -> Result<()> {
+    // Conversion formula: Base = (Input + Offset) * Factor
+    //                     Target = (Base / Factor) - Offset
+    //
+    // Celsius is the base unit (factor=1, offset=0).
+    // For Fahrenheit: Base_C = (F_input + (-32)) * (5/9) = (F - 32) * 5/9
+    // For Kelvin:     Base_C = (K_input + (-273.15)) * 1.0 = K - 273.15
     add_unit_static(
         units,
         aliases,
@@ -529,7 +535,7 @@ fn init_temperature_units(
         "F",
         UnitCategory::Temperature,
         5.0 / 9.0,
-        -32.0,
+        -32.0, // Offset applied before factor: (F - 32) * 5/9 = Celsius
         &["Fahrenheit", "fahrenheit"],
     )?;
     add_unit_static(
@@ -538,7 +544,7 @@ fn init_temperature_units(
         "K",
         UnitCategory::Temperature,
         1.0,
-        -273.15,
+        -273.15, // Offset applied before factor: (K - 273.15) * 1.0 = Celsius
         &["Kelvin", "kelvin"],
     )?;
     Ok(())
