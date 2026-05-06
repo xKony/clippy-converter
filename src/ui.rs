@@ -657,8 +657,7 @@ impl AppState {
                     response.request_focus();
                     self.focus_main_input = false;
                 }
-                if ((response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                if ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && let Ok(val) = self.manual_input_value.parse::<f64>()
                 {
                     self.captured_value = val;
