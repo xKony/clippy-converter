@@ -113,6 +113,10 @@ impl Converter {
 }
 
 /// Extracts a currency multiplier from the start of the unit string.
+///
+/// # Safety invariant
+/// All prefixes must be pure ASCII so that `prefix.len()` is valid
+/// for slicing both the lowercase and original mixed-case strings.
 fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
     let input = input.trim();
     let multipliers = [
@@ -127,6 +131,7 @@ fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
     ];
     let lower = input.to_lowercase();
     for (prefix, factor) in multipliers {
+        debug_assert!(prefix.is_ascii(), "Multiplier prefixes must be ASCII");
         if lower.starts_with(prefix) {
             return Some((factor, input[prefix.len()..].trim()));
         }
