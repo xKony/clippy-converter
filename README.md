@@ -9,43 +9,43 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 ## ✨ Features
 
 - **Global Hotkey Trigger**: Captures highlighted text via simulated clipboard copying using a configurable system-wide shortcut (default: `Shift+Alt+C`).
-- **Floating UI Overlay**: Displays a borderless, transparent, always-on-top window at the exact mouse cursor coordinates.
+- **Floating UI Overlay**: Displays a borderless, transparent, always-on-top window at the exact mouse cursor coordinates using `egui`.
 - **Smart Parsing**: Automatically splits captured strings into numerical values and their accompanying unit or currency symbols.
-- **Offline-First Conversions**: Uses a local `redb` database to cache exchange rates and store static unit conversions (length, weight, temperature).
+- **Offline-First Conversions**: Uses a local `redb` database to cache exchange rates and store static unit conversions (length, weight, temperature, time).
 - **Background API Workers**: Automatically fetches and updates fiat currency rates from Fawaz Ahmed's API (daily) and crypto prices from Binance (hourly).
 - **Favorites & Sorting**: Allows pinning favorite units to the top of the conversion list for quick access.
-- **Conversion History**: Logs past conversions to a local file with configurable retention periods (e.g., 7 days, 30 days, 1 year).
+- **Conversion History**: Logs past conversions to a local database with configurable retention periods (e.g., 7 days, 30 days, 1 year).
 - **System Tray Integration**: Runs silently in the background with a tray icon menu to open settings or exit.
 - **Single Instance Lock**: Built-in protection to ensure only one instance runs at a time, preventing database locks.
 
 ## 🛠 Tech Stack
 
 **Language & Framework**
-- Rust (Edition 2024)
-- `iced` (0.14.0) - GUI framework
-- `tokio` (1) - Asynchronous runtime
+- **Rust (Edition 2024)**
+- **egui / eframe (0.34.1)** - Immediate mode GUI framework
+- **tokio (1)** - Asynchronous runtime
 
 **Database & Storage**
-- `redb` (4.1.0) - Embedded key-value database
-- `bincode` (1.3.3) - Binary serialization
-- `directories` (6.0) - OS-specific directory resolution
+- **redb (4.1.0)** - Embedded key-value database
+- **bincode (1.3.3)** - Binary serialization
+- **directories (6.0)** - OS-specific directory resolution
 
 **System Integration**
-- `global-hotkey` (0.7.0) - System-wide shortcut listener
-- `arboard` (3.4) - Clipboard access
-- `enigo` (0.6.1) - Keystroke simulation (Ctrl+C)
-- `tray-icon` (0.19) - System tray integration
-- `single-instance` (0.3.3) - Single instance lock
-- `open` (5.3) - Opening paths in system explorer
+- **global-hotkey (0.7.0)** - System-wide shortcut listener
+- **arboard (3.4)** - Clipboard access
+- **enigo (0.6.1)** - Keystroke simulation (Ctrl+C)
+- **tray-icon (0.19)** - System tray integration
+- **single-instance (0.3.3)** - Single instance lock
+- **open (5.3)** - Opening paths in system explorer
 
 **Networking & Data Processing**
-- `reqwest` (0.13.2) - HTTP client
-- `serde` (1.0) - Serialization/Deserialization
-- `serde_json` (1.0) - JSON parsing
-- `chrono` (0.4) - Date and time handling
+- **reqwest (0.13.2)** - HTTP client with JSON support
+- **serde (1.0)** - Serialization/Deserialization
+- **serde_json (1.0)** - JSON parsing
+- **chrono (0.4)** - Date and time handling
 
 **Testing**
-- `tempfile` (3.10) - Temporary files for unit tests
+- **tempfile (3.10)** - Temporary files for unit tests
 
 ## 📁 Project Structure
 
@@ -58,14 +58,14 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 │   ├── db.rs            # Thread-safe wrapper for redb embedded database
 │   ├── history.rs       # Local logging and retention of past conversions
 │   ├── hotkey.rs        # Parsing human-readable hotkeys into system structures
-│   ├── main.rs          # Application entry point, single instance lock, and Iced daemon setup
+│   ├── main.rs          # Application entry point and single instance lock
 │   ├── models.rs        # Core data structures and local JSON configuration logic
 │   ├── parser.rs        # String splitting and value extraction logic
-│   ├── ui.rs            # Iced UI state machine, floating window, and tray menu
+│   ├── theme.rs         # UI theme and styling definitions
+│   ├── ui.rs            # egui UI state machine, floating window, and tray menu
 │   └── workers.rs       # Async tokio tasks for periodic background data refreshes
 ├── Cargo.toml           # Project dependencies, metadata, and strict linting rules
-├── README.md            # Project documentation
-└── project-whitepaper.md # Original architectural and UX vision
+└── LICENSE              # MIT License
 ```
 
 ## 🚀 Getting Started
@@ -77,7 +77,7 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 
 ### Installation
 
-```bash
+```powershell
 # Clone the repository
 git clone https://github.com/xKony/clippy-converter.git
 cd clippy-converter
@@ -96,13 +96,12 @@ No environment variables (`.env`) are required.
 
 ## 📖 Usage
 
-1. Start the application. It will run in the background and appear in your system tray.
-2. Highlight a value and unit anywhere on your computer (e.g., `100 EUR`, `50 kg`, or `1.5 BTC`).
-3. Press the global hotkey (`Shift+Alt+C` by default).
-4. A floating window will appear at your mouse cursor displaying the conversion results.
-5. Use the search bar to filter target units, click the star icon to favorite a unit, or click the swap icon to reverse the conversion.
-6. Right-click the system tray icon to access Settings or Quit the application.
+1. **Start the application**: It runs in the background and appears in your system tray.
+2. **Select text**: Highlight a value and unit anywhere on your computer (e.g., `100 EUR`, `50 kg`, or `1.5 BTC`).
+3. **Trigger conversion**: Press the global hotkey (`Shift+Alt+C` by default).
+4. **View results**: A floating window appears at your mouse cursor displaying conversion results.
+5. **Interact**: Use the search bar to filter units, click the star icon to favorite a unit, or right-click the tray icon for Settings.
 
 ## 📄 License
 
-MIT
+MIT - See [LICENSE](LICENSE) for details.

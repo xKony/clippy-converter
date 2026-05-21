@@ -57,7 +57,7 @@ impl Default for Config {
             hotkey: "Shift+Alt+C".to_string(),
             list_size: 10,
             history_enabled: false,
-            history_retention: HistoryRetention::Never,
+            history_retention: HistoryRetention::ThirtyDays,
             fiat_update_interval_mins: 1440, // Daily
             crypto_update_interval_mins: 60, // Every hour
         }

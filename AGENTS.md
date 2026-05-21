@@ -1,4 +1,4 @@
-# GEMINI.md
+# AGENTS.md
 
 ## 1. Project overview
 **Name:** clippy-converter
@@ -13,6 +13,9 @@
 - **Language:** Rust 2024
 - **Dependencies:**
   - `anyhow`: 1.0
+  - `eframe`: 0.34.1
+  - `egui`: 0.34.1
+  - `egui_extras`: 0.34.1 (features: ["svg", "image"])
   - `global-hotkey`: 0.7.0
   - `arboard`: 3.4
   - `enigo`: 0.6.1
@@ -27,9 +30,6 @@
   - `tray-icon`: 0.19
   - `open`: 5.3
   - `single-instance`: 0.3.3
-  - `eframe`: 0.34.1
-  - `egui`: 0.34.1
-  - `egui_extras`: 0.34.1 (features: ["svg", "image"])
 - **Dev Dependencies:**
   - `tempfile`: 3.10
 
@@ -40,18 +40,17 @@
 - `src/db.rs`: Thread-safe wrapper for redb embedded database.
 - `src/history.rs`: Local logging and retention of past conversions.
 - `src/hotkey.rs`: Parsing human-readable hotkeys into system structures.
-- `src/main.rs`: Application entry point and single instance lock.
+- `src/main.rs`: Application entry point, single instance lock, and Iced daemon setup.
 - `src/models.rs`: Core data structures and local JSON configuration logic.
 - `src/parser.rs`: String splitting and value extraction logic.
-- `src/theme.rs`: UI theme and styling definitions.
-- `src/ui.rs`: egui/eframe UI state machine, floating window, and tray menu.
+- `src/ui.rs`: Iced UI state machine, floating window, and tray menu.
 - `src/workers.rs`: Async tokio tasks for periodic background data refreshes.
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
 - **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates.
 - **Data fetching patterns:** Background tokio async workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto).
-- **State management:** App state managed within the `AppState` struct in `src/ui.rs`, updated during the `update` loop. Shared configurations and database handles passed down to the UI thread.
+- **State management:** App state managed within the `AppState` struct, updated during the `update` loop (or `eframe`'s `update` function). Shared configurations and database handles passed down to the UI thread.
 - **Database and ORM:** `redb` (embedded key-value store) used for offline persistence of exchange rates and unit conversion factors.
 
 ## 5. Available scripts
@@ -64,7 +63,7 @@
 No environment variables (`.env`) are required. All configuration is managed via a local `config.json` file in the OS-specific user config directory.
 
 ## 7. Key configuration
-- **Lints:** Extremely strict `clippy` configuration in `Cargo.toml`. `unwrap_used` and `expect_used` are denied globally. `pedantic`, `nursery`, `cargo`, and `perf` are set to `deny`.
+- **Lints:** Extremely strict `clippy` configuration in `Cargo.toml`. `unwrap_used` and `expect_used` are denied globally except in specific, documented startup paths. `pedantic`, `nursery`, `cargo`, and `perf` are set to `deny`.
 - **UI Config:** egui Window is configured as `transparent: true`, `decorations: false`, and `AlwaysOnTop` via `ViewportBuilder`.
 
 ## 8. Development conventions

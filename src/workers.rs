@@ -3,22 +3,36 @@ use crate::db::Db;
 use crate::models::{Config, RateSource};
 use anyhow::{Context, Result};
 use chrono::Utc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Shared, thread-safe configuration handle.
+pub type SharedConfig = Arc<RwLock<Config>>;
+
 /// Starts the background worker for fiat currency updates.
-pub async fn start_fiat_worker(db: Db, config: Config) {
+/// Reads the interval from the shared config on each iteration
+/// so that runtime changes are picked up immediately.
+pub async fn start_fiat_worker(db: Db, config: SharedConfig) {
     loop {
         let _ = update_fiat_rates(&db).await;
-        sleep(Duration::from_secs(config.fiat_update_interval_mins * 60)).await;
+        let interval_mins = config
+            .read()
+            .map_or(1440, |c| c.fiat_update_interval_mins);
+        sleep(Duration::from_secs(interval_mins * 60)).await;
     }
 }
 
 /// Starts the background worker for cryptocurrency updates.
-pub async fn start_crypto_worker(db: Db, config: Config) {
+/// Reads the interval from the shared config on each iteration
+/// so that runtime changes are picked up immediately.
+pub async fn start_crypto_worker(db: Db, config: SharedConfig) {
     loop {
         let _ = update_crypto_rates(&db).await;
-        sleep(Duration::from_secs(config.crypto_update_interval_mins * 60)).await;
+        let interval_mins = config
+            .read()
+            .map_or(60, |c| c.crypto_update_interval_mins);
+        sleep(Duration::from_secs(interval_mins * 60)).await;
     }
 }
 

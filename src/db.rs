@@ -339,6 +339,7 @@ impl Db {
 }
 
 /// Helper to add a unit and its variations to the database.
+/// Skips insertion if the unit already exists to avoid overwriting on every launch.
 fn add_unit_static(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
@@ -348,18 +349,27 @@ fn add_unit_static(
     offset: f64,
     variations: &[&str],
 ) -> Result<()> {
-    units
-        .insert(
-            sym,
-            UnitEntry {
-                factor,
-                offset,
-                category: cat as u8,
-                timestamp: 0,
-                source: RateSource::Static as u8,
-            },
-        )
-        .context("Failed to insert static unit")?;
+    // Only insert if the unit doesn't already exist
+    let exists = units
+        .get(sym)
+        .context("Failed to check existing unit")?
+        .is_some();
+
+    if !exists {
+        units
+            .insert(
+                sym,
+                UnitEntry {
+                    factor,
+                    offset,
+                    category: cat as u8,
+                    timestamp: 0,
+                    source: RateSource::Static as u8,
+                },
+            )
+            .context("Failed to insert static unit")?;
+    }
+
     for v in variations {
         aliases.insert(*v, sym).context("Failed to insert alias")?;
         aliases
@@ -504,6 +514,12 @@ fn init_temperature_units(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
 ) -> Result<()> {
+    // Conversion formula: Base = (Input + Offset) * Factor
+    //                     Target = (Base / Factor) - Offset
+    //
+    // Celsius is the base unit (factor=1, offset=0).
+    // For Fahrenheit: Base_C = (F_input + (-32)) * (5/9) = (F - 32) * 5/9
+    // For Kelvin:     Base_C = (K_input + (-273.15)) * 1.0 = K - 273.15
     add_unit_static(
         units,
         aliases,
@@ -519,7 +535,7 @@ fn init_temperature_units(
         "F",
         UnitCategory::Temperature,
         5.0 / 9.0,
-        -32.0,
+        -32.0, // Offset applied before factor: (F - 32) * 5/9 = Celsius
         &["Fahrenheit", "fahrenheit"],
     )?;
     add_unit_static(
@@ -528,7 +544,7 @@ fn init_temperature_units(
         "K",
         UnitCategory::Temperature,
         1.0,
-        -273.15,
+        -273.15, // Offset applied before factor: (K - 273.15) * 1.0 = Celsius
         &["Kelvin", "kelvin"],
     )?;
     Ok(())

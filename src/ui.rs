@@ -3,11 +3,11 @@ use crate::converter::Converter;
 use crate::db::Db;
 use crate::hotkey;
 use crate::models::{Config, ConversionResult, HistoryRetention};
+use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
 use eframe::egui;
-use enigo::{Enigo, Mouse, Settings as EnigoSettings};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
@@ -27,6 +27,15 @@ pub enum EventMsg {
     Exit,
 }
 
+/// Payload sent over the history logging channel to the background runtime.
+pub struct HistoryLogEntry {
+    pub input_value: f64,
+    pub input_unit: String,
+    pub output_value: f64,
+    pub output_unit: String,
+    pub retention_days: Option<i64>,
+}
+
 impl std::fmt::Display for HistoryRetention {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -41,12 +50,13 @@ impl std::fmt::Display for HistoryRetention {
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     pub config: Config,
+    pub shared_config: SharedConfig,
     pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
-    pub enigo: Enigo,
     pub hotkey_manager: GlobalHotKeyManager,
     pub hotkey_id: global_hotkey::hotkey::HotKey,
+    /// Held alive to keep the OS tray icon visible. Dropping this removes the icon.
     pub tray_icon: TrayIcon,
     pub event_rx: Receiver<EventMsg>,
 
@@ -71,6 +81,15 @@ pub struct AppState {
 
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
+
+    pub history_tx: tokio::sync::mpsc::UnboundedSender<HistoryLogEntry>,
+
+    /// Signals the background clipboard worker to capture the current selection.
+    capture_req_tx: Sender<()>,
+    /// Receives captured selection text from the background worker.
+    capture_res_rx: Receiver<anyhow::Result<String>>,
+    /// True while waiting for background clipboard capture after a hotkey press.
+    pub capture_pending: bool,
 }
 
 /// Runs the eframe application.
@@ -96,7 +115,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_resizable(false)
             .with_inner_size([350.0, 420.0]),
         run_and_return: false,
-        vsync: true,
+        vsync: false,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -104,7 +123,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let converter = Converter::new(config.clone(), db.clone());
     let clipboard = ClipboardManager::new().context("Failed to initialize clipboard")?;
-    let enigo = Enigo::new(&EnigoSettings::default()).context("Failed to initialize enigo")?;
     let hotkey_manager =
         GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
     let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
@@ -127,12 +145,31 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
 
+    let (capture_req_tx, capture_req_rx) = mpsc::channel::<()>();
+    let (capture_res_tx, capture_res_rx) = mpsc::channel::<anyhow::Result<String>>();
+    std::thread::spawn(move || {
+        let Ok(mut worker_clipboard) = ClipboardManager::new() else {
+            return;
+        };
+        while capture_req_rx.recv().is_ok() {
+            let result = worker_clipboard.capture_selection();
+            let _ = capture_res_tx.send(result);
+        }
+    });
+
+    let shared_config: SharedConfig =
+        std::sync::Arc::new(std::sync::RwLock::new(config.clone()));
+
+    // Channel for sending history log entries to the background runtime
+    let (history_tx, mut history_rx) =
+        tokio::sync::mpsc::unbounded_channel::<HistoryLogEntry>();
+
     // Spawn tokio runtime for background workers
     std::thread::spawn({
         let db_fiat = db.clone();
-        let config_fiat = config.clone();
+        let config_fiat = shared_config.clone();
         let db_crypto = db.clone();
-        let config_crypto = config.clone();
+        let config_crypto = shared_config.clone();
 
         move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -142,6 +179,21 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                     db_crypto,
                     config_crypto,
                 ));
+
+                // History log receiver — processes entries from the UI thread
+                tokio::spawn(async move {
+                    while let Some(entry) = history_rx.recv().await {
+                        let _ = crate::history::log_conversion(
+                            entry.input_value,
+                            &entry.input_unit,
+                            entry.output_value,
+                            &entry.output_unit,
+                            entry.retention_days,
+                        )
+                        .await;
+                    }
+                });
+
                 std::future::pending::<()>().await;
             });
         }
@@ -188,10 +240,10 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
             Ok(Box::new(AppState {
                 config,
+                shared_config,
                 db,
                 converter,
                 clipboard,
-                enigo,
                 hotkey_manager,
                 hotkey_id: hk,
                 tray_icon,
@@ -218,6 +270,11 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
+                history_tx,
+
+                capture_req_tx,
+                capture_res_rx,
+                capture_pending: false,
             }))
         }),
     )
@@ -229,14 +286,14 @@ impl eframe::App for AppState {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.run_logic(&ctx, frame, ui);
+        self.run_logic(&ctx, ui);
     }
 }
 
 impl AppState {
-    fn run_logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame, ui: &mut egui::Ui) {
+    fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
@@ -246,28 +303,55 @@ impl AppState {
                     self.settings_window_open = true;
                 }
                 EventMsg::HotkeyTriggered => {
-                    self.handle_hotkey(ctx);
+                    self.show_converter_window(ctx);
+                    let _ = self.capture_req_tx.send(());
                 }
             }
         }
 
-        // Settings as a child viewport (has its own title bar and decorations)
+        if let Ok(capture_result) = self.capture_res_rx.try_recv() {
+            self.apply_capture_result(capture_result);
+            ctx.request_repaint();
+        }
+
+        // Settings rendered as an egui::Window inside the root viewport.
+        // NOTE: show_viewport_immediate is NOT supported by the wgpu renderer
+        // and will panic. Using an egui::Window avoids spawning a child OS window.
         if self.settings_window_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("settings"),
-                egui::ViewportBuilder::default()
-                    .with_title("Settings")
-                    .with_inner_size([400.0, 500.0]),
-                |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        self.settings_window_open = false;
-                    }
-                    #[allow(deprecated)]
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        self.render_settings(ui, ctx);
-                    });
-                },
-            );
+            // Ensure the root viewport is visible so the settings window can be seen
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            // Resize root viewport to fit settings content
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 500.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title("Clippy Converter - Settings".into()));
+
+            // Paint a solid background to cover the transparent root viewport
+            let bg_color = egui::Color32::from_rgb(24, 24, 24);
+            ui.painter()
+                .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
+
+            let content_frame = egui::Frame {
+                fill: egui::Color32::TRANSPARENT,
+                inner_margin: egui::Margin::same(16),
+                ..Default::default()
+            };
+            content_frame.show(ui, |ui| {
+                self.render_settings(ui, ctx);
+            });
+
+            // Check if user closed the window via OS close button
+            if ctx.input(|i| i.viewport().close_requested()) {
+                self.settings_window_open = false;
+                // Cancel the close so the daemon keeps running
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // Restore the root viewport to its converter configuration
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(350.0, 420.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+
+            return;
         }
 
         // The main converter popup is the ROOT viewport itself.
@@ -277,6 +361,8 @@ impl AppState {
             return;
         }
 
+        // Ensure converter mode viewport settings are applied
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
@@ -315,41 +401,56 @@ impl AppState {
         ctx.request_repaint();
     }
 
-    #[expect(
-        clippy::unwrap_used,
-        reason = "tokio runtime creation in simple thread is expected to succeed"
-    )]
     fn log_conversion_if_enabled(&self) {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
             && let Some(first_output) = result.outputs.first()
         {
-            let input_val = result.input_value;
-            let input_unit = result.input_unit.clone();
-            let out_val = first_output.value;
-            let out_unit = first_output.unit.clone();
-            let retention = self.config.history_retention;
-
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async move {
-                    let _ = crate::history::log_conversion(
-                        input_val,
-                        &input_unit,
-                        out_val,
-                        &out_unit,
-                        retention.to_days(),
-                    )
-                    .await;
-                });
+            let _ = self.history_tx.send(HistoryLogEntry {
+                input_value: result.input_value,
+                input_unit: result.input_unit.clone(),
+                output_value: first_output.value,
+                output_unit: first_output.unit.clone(),
+                retention_days: self.config.history_retention.to_days(),
             });
         }
     }
 
-    fn handle_hotkey(&mut self, ctx: &egui::Context) {
-        let parsed_opt = self
-            .clipboard
-            .capture_selection()
+    /// Shows the converter popup immediately at the cursor (does not block on clipboard).
+    fn show_converter_window(&mut self, ctx: &egui::Context) {
+        self.capture_pending = true;
+        self.current_result = None;
+        self.current_mode = WindowMode::ValueInput;
+        self.manual_input_value = String::new();
+        self.captured_value = 0.0;
+        self.search_query.clear();
+        self.search_query_lower.clear();
+
+        let (x, y) = self.clipboard.cursor_position();
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Screen coordinates fit in f32 mantissa"
+        )]
+        {
+            self.main_window_pos = egui::pos2(x as f32, y as f32);
+        }
+
+        self.main_window_open = true;
+        self.main_window_was_focused = false;
+        self.focus_main_input = true;
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    /// Applies text captured in the background worker (parse, convert, update mode).
+    fn apply_capture_result(&mut self, capture_result: anyhow::Result<String>) {
+        self.capture_pending = false;
+
+        let parsed_opt = capture_result
             .ok()
             .and_then(|text| crate::parser::parse_input(&text).ok());
 
@@ -374,28 +475,7 @@ impl AppState {
             self.current_mode = WindowMode::ValueInput;
             self.manual_input_value = String::new();
         }
-
-        self.search_query = String::new();
-        self.search_query_lower = String::new();
-
-        let (x, y) = self.enigo.location().unwrap_or((100, 100));
-
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "Screen coordinates fit in f32 mantissa"
-        )]
-        {
-            self.main_window_pos = egui::pos2(x as f32, y as f32);
-        }
-
-        self.main_window_open = true;
-        self.main_window_was_focused = false;
         self.focus_main_input = true;
-
-        // The converter popup is the root viewport — send commands to ROOT
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -484,6 +564,7 @@ impl AppState {
         ui.horizontal(|ui| {
             ui.label("Fiat:");
             ui.text_edit_singleline(&mut self.config_fiat_interval_str);
+            ui.separator();
             ui.label("Crypto:");
             ui.text_edit_singleline(&mut self.config_crypto_interval_str);
         });
@@ -500,6 +581,10 @@ impl AppState {
                 self.config.hotkey = recorded;
             }
             let _ = self.config.save();
+            // Propagate changes to background workers
+            if let Ok(mut shared) = self.shared_config.write() {
+                *shared = self.config.clone();
+            }
             if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
                 && hk != self.hotkey_id
             {
@@ -537,6 +622,13 @@ impl AppState {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match self.current_mode {
+                    WindowMode::ValueInput if self.capture_pending => {
+                        ui.label(
+                            egui::RichText::new("Reading selection…")
+                                .strong()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
                     WindowMode::ValueInput => {
                         ui.label(egui::RichText::new("Enter value").strong());
                     }
@@ -601,18 +693,22 @@ impl AppState {
 
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {
-                let response = ui.add(
+                let response = ui.add_enabled(
+                    !self.capture_pending,
                     egui::TextEdit::singleline(&mut self.manual_input_value)
-                        .hint_text("0.00")
+                        .hint_text(if self.capture_pending {
+                            "…"
+                        } else {
+                            "0.00"
+                        })
                         .font(egui::TextStyle::Heading)
                         .desired_width(f32::INFINITY),
                 );
-                if self.focus_main_input {
+                if self.focus_main_input && !self.capture_pending {
                     response.request_focus();
                     self.focus_main_input = false;
                 }
-                if ((response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                if ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && let Ok(val) = self.manual_input_value.parse::<f64>()
                 {
                     self.captured_value = val;
