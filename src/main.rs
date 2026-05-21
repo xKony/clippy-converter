@@ -8,6 +8,7 @@ pub mod history;
 pub mod hotkey;
 pub mod models;
 pub mod parser;
+pub mod placement;
 pub mod theme;
 pub mod ui;
 pub mod workers;

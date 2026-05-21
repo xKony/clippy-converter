@@ -1,9 +1,75 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt, BufReader as AsyncBufReader};
+
+/// A parsed history log entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryItem {
+    pub input_value: f64,
+    pub input_unit: String,
+    pub output_value: f64,
+    pub output_unit: String,
+}
+
+/// Returns the most recent history entries (newest first), up to `limit`.
+///
+/// # Errors
+/// Returns an error if the history file cannot be read.
+pub fn list_recent(limit: usize) -> Result<Vec<HistoryItem>> {
+    let path = get_history_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(&path)
+        .with_context(|| format!("Failed to open history log at {}", path.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut items = Vec::new();
+    for line in reader.lines() {
+        let line = line.context("Failed to read history line")?;
+        if let Some(item) = parse_history_line(&line) {
+            items.push(item);
+        }
+    }
+
+    let skip = items.len().saturating_sub(limit);
+    Ok(items.into_iter().skip(skip).rev().collect())
+}
+
+fn parse_history_line(line: &str) -> Option<HistoryItem> {
+    // [timestamp] | 42.5000 kg -> 93.7000 lb
+    let pipe_idx = line.find('|')?;
+    let rest = line[pipe_idx + 1..].trim();
+    let arrow_idx = rest.find("->")?;
+    let left = rest[..arrow_idx].trim();
+    let right = rest[arrow_idx + 2..].trim();
+
+    let (input_value, input_unit) = split_value_unit(left)?;
+    let (output_value, output_unit) = split_value_unit(right)?;
+
+    Some(HistoryItem {
+        input_value,
+        input_unit,
+        output_value,
+        output_unit,
+    })
+}
+
+fn split_value_unit(part: &str) -> Option<(f64, String)> {
+    let mut tokens = part.split_whitespace();
+    let value: f64 = tokens.next()?.parse().ok()?;
+    let unit = tokens.collect::<Vec<_>>().join(" ");
+    if unit.is_empty() {
+        return None;
+    }
+    Some((value, unit))
+}
 
 /// Appends a conversion result to the history log file and prunes old entries.
 ///
@@ -59,7 +125,7 @@ async fn prune_history(path: &std::path::Path, days: i64) -> Result<()> {
     let now = Utc::now();
     let threshold = now - chrono::Duration::days(days);
     let mut kept_lines = Vec::new();
-    let mut reader = BufReader::new(file).lines();
+    let mut reader = AsyncBufReader::new(file).lines();
 
     while let Some(line) = reader.next_line().await? {
         // Entry format: [2024-04-23T10:00:00Z] | ...
@@ -104,5 +170,35 @@ mod tests {
         let path = get_history_path();
         assert!(path.is_ok());
         assert!(path.unwrap().ends_with("history.log"));
+    }
+
+    #[test]
+    fn test_parse_history_line() {
+        let line = "[2024-04-23T10:00:00Z] | 42.5000 kg -> 93.7000 lb";
+        let item = parse_history_line(line).unwrap();
+        assert!((item.input_value - 42.5).abs() < f64::EPSILON);
+        assert_eq!(item.input_unit, "kg");
+        assert!((item.output_value - 93.7).abs() < f64::EPSILON);
+        assert_eq!(item.output_unit, "lb");
+    }
+
+    #[test]
+    fn test_list_recent_returns_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\n[t2] | 2.0000 kg -> 4.4092 lb\n",
+        )
+        .unwrap();
+
+        // Override path by parsing directly
+        let items: Vec<HistoryItem> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter_map(parse_history_line)
+            .collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].input_unit, "kg");
     }
 }

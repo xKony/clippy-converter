@@ -11,6 +11,9 @@ pub struct Config {
     pub favorites: Vec<String>,
     /// Global hotkey combination (e.g., "Shift+Alt+C").
     pub hotkey: String,
+    /// When true, the hotkey copies the current selection before opening the popup.
+    #[serde(default)]
+    pub read_selection_on_hotkey: bool,
     /// Maximum number of conversion results to show.
     pub list_size: usize,
     /// Whether to log conversions to a file.
@@ -55,6 +58,7 @@ impl Default for Config {
                 "lb".to_string(),
             ],
             hotkey: "Shift+Alt+C".to_string(),
+            read_selection_on_hotkey: false,
             list_size: 10,
             history_enabled: false,
             history_retention: HistoryRetention::ThirtyDays,
@@ -204,5 +208,20 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let decoded: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, decoded);
+    }
+
+    #[test]
+    fn test_config_missing_read_selection_defaults_false() {
+        let json = r#"{
+            "favorites": [],
+            "hotkey": "Shift+Alt+C",
+            "list_size": 10,
+            "history_enabled": false,
+            "history_retention": "ThirtyDays",
+            "fiat_update_interval_mins": 1440,
+            "crypto_update_interval_mins": 60
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.read_selection_on_hotkey);
     }
 }

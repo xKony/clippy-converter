@@ -1,8 +1,10 @@
 use crate::clipboard::ClipboardManager;
 use crate::converter::Converter;
 use crate::db::Db;
+use crate::history::HistoryItem;
 use crate::hotkey;
-use crate::models::{Config, ConversionResult, HistoryRetention};
+use crate::models::{Config, ConversionResult, HistoryRetention, UnitInfo};
+use crate::placement;
 use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -88,8 +90,12 @@ pub struct AppState {
     capture_req_tx: Sender<()>,
     /// Receives captured selection text from the background worker.
     capture_res_rx: Receiver<anyhow::Result<String>>,
-    /// True while waiting for background clipboard capture after a hotkey press.
+    /// True while waiting for background clipboard capture (selection-on-hotkey mode).
     pub capture_pending: bool,
+    /// Hotkey fired with read-selection enabled; popup opens after capture completes.
+    hotkey_waiting_capture: bool,
+    pub recent_history: Vec<HistoryItem>,
+    selected_recent_index: Option<usize>,
 }
 
 /// Runs the eframe application.
@@ -275,6 +281,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 capture_req_tx,
                 capture_res_rx,
                 capture_pending: false,
+                hotkey_waiting_capture: false,
+                recent_history: Vec::new(),
+                selected_recent_index: None,
             }))
         }),
     )
@@ -303,14 +312,27 @@ impl AppState {
                     self.settings_window_open = true;
                 }
                 EventMsg::HotkeyTriggered => {
-                    self.show_converter_window(ctx);
-                    let _ = self.capture_req_tx.send(());
+                    self.reset_converter_popup_state();
+                    if self.config.read_selection_on_hotkey {
+                        self.hotkey_waiting_capture = true;
+                        self.capture_pending = true;
+                        let _ = self.capture_req_tx.send(());
+                    } else {
+                        self.load_recent_history();
+                        self.show_converter_window(ctx);
+                    }
                 }
             }
         }
 
         if let Ok(capture_result) = self.capture_res_rx.try_recv() {
+            let waiting_show = self.hotkey_waiting_capture;
             self.apply_capture_result(capture_result);
+            if waiting_show {
+                self.hotkey_waiting_capture = false;
+                self.load_recent_history();
+                self.show_converter_window(ctx);
+            }
             ctx.request_repaint();
         }
 
@@ -416,25 +438,28 @@ impl AppState {
         }
     }
 
-    /// Shows the converter popup immediately at the cursor (does not block on clipboard).
-    fn show_converter_window(&mut self, ctx: &egui::Context) {
-        self.capture_pending = true;
+    fn reset_converter_popup_state(&mut self) {
+        self.capture_pending = false;
         self.current_result = None;
         self.current_mode = WindowMode::ValueInput;
         self.manual_input_value = String::new();
         self.captured_value = 0.0;
         self.search_query.clear();
         self.search_query_lower.clear();
+        self.selected_recent_index = None;
+    }
 
-        let (x, y) = self.clipboard.cursor_position();
+    fn load_recent_history(&mut self) {
+        self.recent_history = crate::history::list_recent(10).unwrap_or_default();
+        self.selected_recent_index = None;
+    }
 
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "Screen coordinates fit in f32 mantissa"
-        )]
-        {
-            self.main_window_pos = egui::pos2(x as f32, y as f32);
-        }
+    /// Shows the converter popup at the cursor (clipboard capture is optional and separate).
+    fn show_converter_window(&mut self, ctx: &egui::Context) {
+        self.capture_pending = false;
+
+        let cursor = self.clipboard.cursor_position();
+        self.main_window_pos = placement::popup_position_at_cursor(cursor);
 
         self.main_window_open = true;
         self.main_window_was_focused = false;
@@ -522,6 +547,18 @@ impl AppState {
             self.recorded_hotkey = None;
             let _ = self.hotkey_manager.unregister(self.hotkey_id);
         }
+
+        ui.separator();
+
+        ui.checkbox(
+            &mut self.config.read_selection_on_hotkey,
+            "Read selected text on hotkey",
+        );
+        ui.label(
+            egui::RichText::new("Unchecked: Quick convert opens empty. Checked: copies selection first.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
 
         ui.separator();
 
@@ -622,15 +659,11 @@ impl AppState {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match self.current_mode {
-                    WindowMode::ValueInput if self.capture_pending => {
-                        ui.label(
-                            egui::RichText::new("Reading selection…")
-                                .strong()
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                    }
                     WindowMode::ValueInput => {
                         ui.label(egui::RichText::new("Enter value").strong());
+                        if self.capture_pending {
+                            ui.spinner();
+                        }
                     }
                     WindowMode::SourceUnitSelection => {
                         if ui
@@ -691,20 +724,25 @@ impl AppState {
 
         ui.add_space(5.0);
 
+        if self.current_result.is_none()
+            && matches!(
+                self.current_mode,
+                WindowMode::ValueInput | WindowMode::SourceUnitSelection
+            )
+        {
+            self.render_recent_history(ui);
+        }
+
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {
-                let response = ui.add_enabled(
-                    !self.capture_pending,
-                    egui::TextEdit::singleline(&mut self.manual_input_value)
-                        .hint_text(if self.capture_pending {
-                            "…"
-                        } else {
-                            "0.00"
-                        })
-                        .font(egui::TextStyle::Heading)
-                        .desired_width(f32::INFINITY),
-                );
-                if self.focus_main_input && !self.capture_pending {
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.manual_input_value)
+                            .hint_text("0.00")
+                            .font(egui::TextStyle::Heading)
+                            .desired_width(f32::INFINITY),
+                    );
+                if self.focus_main_input {
                     response.request_focus();
                     self.focus_main_input = false;
                 }
@@ -770,7 +808,7 @@ impl AppState {
 
             if self.current_mode == WindowMode::SourceUnitSelection {
                 let all_units = self.converter.get_all_units().unwrap_or_default();
-                let matching_units: Vec<_> = all_units
+                let mut matching_units: Vec<_> = all_units
                     .into_iter()
                     .filter(|u| {
                         u.symbol.to_lowercase().contains(&self.search_query_lower)
@@ -778,8 +816,9 @@ impl AppState {
                                 .iter()
                                 .any(|a| a.to_lowercase().contains(&self.search_query_lower))
                     })
-                    .take(self.config.list_size)
                     .collect();
+                Self::sort_units_favorites_first(&mut matching_units, &self.config.favorites);
+                matching_units.truncate(self.config.list_size);
 
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
@@ -966,6 +1005,95 @@ impl AppState {
                 ctx.request_repaint();
             }
         }
+    }
+
+    fn render_recent_history(&mut self, ui: &mut egui::Ui) {
+        if self.recent_history.is_empty() {
+            return;
+        }
+
+        let selected_text = self
+            .selected_recent_index
+            .and_then(|idx| self.recent_history.get(idx))
+            .map_or_else(
+                || "Recent conversions…".to_string(),
+                Self::format_history_label,
+            );
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Recent")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            egui::ComboBox::from_id_salt("recent_conversions")
+                .selected_text(selected_text)
+                .width(ui.available_width() - 8.0)
+                .show_ui(ui, |ui| {
+                    for (idx, item) in self.recent_history.iter().enumerate() {
+                        let label = Self::format_history_label(item);
+                        if ui
+                            .selectable_value(&mut self.selected_recent_index, Some(idx), label)
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                    }
+                });
+        });
+
+        if let Some(idx) = self.selected_recent_index
+            && let Some(item) = self.recent_history.get(idx).cloned()
+        {
+            ui.horizontal(|ui| {
+                if ui.button("Copy output").clicked() {
+                    let text = Self::history_output_text(&item);
+                    if self.clipboard.set_text(text).is_ok() {
+                        self.copied_notification =
+                            Some(("Copied!".to_string(), Instant::now()));
+                    }
+                }
+                if ui.button("Reopen").clicked() {
+                    self.reopen_history_item(&item);
+                }
+            });
+            ui.add_space(4.0);
+        }
+    }
+
+    fn format_history_label(item: &HistoryItem) -> String {
+        format!(
+            "{:.1} {} → {:.1} {}",
+            item.input_value, item.input_unit, item.output_value, item.output_unit
+        )
+    }
+
+    fn history_output_text(item: &HistoryItem) -> String {
+        format!("{:.4} {}", item.output_value, item.output_unit)
+    }
+
+    fn reopen_history_item(&mut self, item: &HistoryItem) {
+        if let Ok(result) = self.converter.convert(item.input_value, &item.input_unit) {
+            self.captured_value = item.input_value;
+            self.current_result = Some(result);
+            self.current_mode = WindowMode::Results;
+            self.search_query.clear();
+            self.search_query_lower.clear();
+            self.focus_main_input = true;
+        }
+    }
+
+    fn sort_units_favorites_first(units: &mut [UnitInfo], favorites: &[String]) {
+        units.sort_by(|a, b| {
+            let a_fav = favorites.iter().position(|u| u == &a.symbol);
+            let b_fav = favorites.iter().position(|u| u == &b.symbol);
+            match (a_fav, b_fav) {
+                (Some(ai), Some(bi)) => ai.cmp(&bi),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.symbol.cmp(&b.symbol),
+            }
+        });
     }
 }
 
