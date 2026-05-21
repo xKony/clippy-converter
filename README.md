@@ -4,12 +4,12 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 
-A lightweight, background unit and currency converter with global hotkeys and local caching. It captures selected text via a system-wide hotkey, parses numerical values and units, and displays a floating, transparent UI at the mouse cursor coordinates for instant conversion.
+A lightweight, background unit and currency converter with global hotkeys and local caching. It captures selected text via a system-wide hotkey, parses numerical values and units, and displays a floating UI at the mouse cursor coordinates for instant conversion.
 
 ## ✨ Features
 
 - **Global Hotkey Trigger**: Captures highlighted text via simulated clipboard copying using a configurable system-wide shortcut (default: `Shift+Alt+C`).
-- **Floating UI Overlay**: Displays a borderless, transparent, always-on-top window at the exact mouse cursor coordinates using `egui`. Includes native Windows transparency effects (Mica/Acrylic) for a modern, frosted-glass appearance.
+- **Floating UI Overlay**: Displays a borderless, always-on-top window at the exact mouse cursor coordinates using `egui`.
 - **Smart Parsing**: Automatically splits captured strings into numerical values and their accompanying unit or currency symbols.
 - **Offline-First Conversions**: Uses a local `redb` database to cache exchange rates and store static unit conversions (length, weight, temperature, time).
 - **Background API Workers**: Automatically fetches and updates fiat currency rates from Fawaz Ahmed's API (daily) and crypto prices from Binance (hourly).
@@ -36,7 +36,6 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 - **enigo (0.6.1)** - Keystroke simulation (Ctrl+C)
 - **tray-icon (0.19)** - System tray integration
 - **single-instance (0.3.3)** - Single instance lock
-- **window-vibrancy (0.7)** - Native Windows transparency (Mica/Acrylic)
 - **open (5.3)** - Opening paths in system explorer
 
 **Networking & Data Processing**

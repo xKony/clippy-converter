@@ -95,8 +95,6 @@ pub struct AppState {
     /// Hotkey fired with read-selection enabled; popup opens after capture completes.
     hotkey_waiting_capture: bool,
     pub recent_history: Vec<HistoryItem>,
-    /// Windows acrylic/mica applied to the native window (see `window_effects`).
-    popup_effect_applied: bool,
 }
 
 /// Runs the eframe application.
@@ -117,7 +115,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_visible(false)
             .with_taskbar(false)
             .with_decorations(false)
-            .with_transparent(true)
             .with_always_on_top()
             .with_resizable(false)
             .with_inner_size([350.0, 420.0]),
@@ -284,7 +281,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 capture_pending: false,
                 hotkey_waiting_capture: false,
                 recent_history: Vec::new(),
-                popup_effect_applied: false,
             }))
         }),
     )
@@ -292,15 +288,8 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 }
 
 impl eframe::App for AppState {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.main_window_open {
-            let _ = crate::window_effects::try_apply_popup_effect(frame, &mut self.popup_effect_applied);
-        }
         self.run_logic(&ctx, ui);
     }
 }
@@ -352,7 +341,6 @@ impl AppState {
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Title("Clippy Converter - Settings".into()));
 
-            // Paint a solid background to cover the transparent root viewport
             let bg_color = egui::Color32::from_rgb(24, 24, 24);
             ui.painter()
                 .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
@@ -405,12 +393,7 @@ impl AppState {
             return;
         }
 
-        // With DWM acrylic/mica, a lighter fill lets the desktop show through.
-        let bg_color = if self.popup_effect_applied {
-            egui::Color32::from_rgba_unmultiplied(24, 24, 28, 100)
-        } else {
-            crate::theme::popup_panel_fill()
-        };
+        let bg_color = egui::Color32::from_rgb(30, 30, 30);
         ui.painter()
             .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
 

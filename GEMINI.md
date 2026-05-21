@@ -3,7 +3,7 @@
 ## 1. Project overview
 **Name:** clippy-converter
 **Purpose:** A lightweight, background unit and currency converter with global hotkeys and local caching.
-**Description:** Captures selected text via programmatic clipboard manipulation, parses numerical values and units, and displays a floating, transparent UI at the mouse cursor coordinates for instant conversion.
+**Description:** Captures selected text via programmatic clipboard manipulation, parses numerical values and units, and displays a floating UI at the mouse cursor coordinates for instant conversion.
 **Repository Type:** Single Rust package.
 
 ## 2. Exact versions
@@ -30,8 +30,6 @@
   - `eframe`: 0.34.1
   - `egui`: 0.34.1
   - `egui_extras`: 0.34.1 (features: ["svg", "image"])
-  - `window-vibrancy`: 0.7
-  - `raw-window-handle`: 0.6
 - **Dev Dependencies:**
   - `tempfile`: 3.10
 
@@ -45,14 +43,13 @@
 - `src/main.rs`: Application entry point and single instance lock.
 - `src/models.rs`: Core data structures and local JSON configuration logic.
 - `src/parser.rs`: String splitting and value extraction logic.
-- `src/theme.rs`: UI theme and styling definitions (colors, transparency, fonts).
+- `src/theme.rs`: UI theme and styling definitions (colors, fonts).
 - `src/ui.rs`: egui/eframe UI state machine, floating window, and tray menu.
-- `src/window_effects.rs`: Platform-specific visual effects (Mica, Acrylic).
 - `src/workers.rs`: Async tokio tasks for periodic background data refreshes.
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
-- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates. Utilizes `window-vibrancy` for native Windows transparency effects (Mica/Acrylic).
+- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, always-on-top floating windows at cursor coordinates.
 - **Data fetching patterns:** Background tokio async workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto).
 - **State management:** App state managed within the `AppState` struct in `src/ui.rs`, updated during the `update` loop. Shared configurations and database handles passed down to the UI thread.
 - **Database and ORM:** `redb` (embedded key-value store) used for offline persistence of exchange rates and unit conversion factors.
@@ -68,7 +65,7 @@ No environment variables (`.env`) are required. All configuration is managed via
 
 ## 7. Key configuration
 - **Lints:** Extremely strict `clippy` configuration in `Cargo.toml`. `unwrap_used` and `expect_used` are denied globally. `pedantic`, `nursery`, `cargo`, and `perf` are set to `deny`.
-- **UI Config:** egui Window is configured as `transparent: true`, `decorations: false`, and `AlwaysOnTop` via `ViewportBuilder`.
+- **UI Config:** egui Window is configured as `decorations: false` and `AlwaysOnTop` via `ViewportBuilder`.
 
 ## 8. Development conventions
 - **Naming conventions:** Standard Rust `snake_case` for functions/variables, `PascalCase` for types.

@@ -11,7 +11,6 @@ pub mod parser;
 pub mod placement;
 pub mod theme;
 pub mod ui;
-pub mod window_effects;
 pub mod workers;
 
 use anyhow::{Context, Result};
