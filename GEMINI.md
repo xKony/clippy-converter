@@ -30,6 +30,8 @@
   - `eframe`: 0.34.1
   - `egui`: 0.34.1
   - `egui_extras`: 0.34.1 (features: ["svg", "image"])
+  - `window-vibrancy`: 0.7
+  - `raw-window-handle`: 0.6
 - **Dev Dependencies:**
   - `tempfile`: 3.10
 
@@ -43,13 +45,14 @@
 - `src/main.rs`: Application entry point and single instance lock.
 - `src/models.rs`: Core data structures and local JSON configuration logic.
 - `src/parser.rs`: String splitting and value extraction logic.
-- `src/theme.rs`: UI theme and styling definitions.
+- `src/theme.rs`: UI theme and styling definitions (colors, transparency, fonts).
 - `src/ui.rs`: egui/eframe UI state machine, floating window, and tray menu.
+- `src/window_effects.rs`: Platform-specific visual effects (Mica, Acrylic).
 - `src/workers.rs`: Async tokio tasks for periodic background data refreshes.
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
-- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates.
+- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, transparent, always-on-top floating windows at cursor coordinates. Utilizes `window-vibrancy` for native Windows transparency effects (Mica/Acrylic).
 - **Data fetching patterns:** Background tokio async workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto).
 - **State management:** App state managed within the `AppState` struct in `src/ui.rs`, updated during the `update` loop. Shared configurations and database handles passed down to the UI thread.
 - **Database and ORM:** `redb` (embedded key-value store) used for offline persistence of exchange rates and unit conversion factors.

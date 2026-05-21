@@ -95,7 +95,8 @@ pub struct AppState {
     /// Hotkey fired with read-selection enabled; popup opens after capture completes.
     hotkey_waiting_capture: bool,
     pub recent_history: Vec<HistoryItem>,
-    selected_recent_index: Option<usize>,
+    /// Windows acrylic/mica applied to the native window (see `window_effects`).
+    popup_effect_applied: bool,
 }
 
 /// Runs the eframe application.
@@ -283,7 +284,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 capture_pending: false,
                 hotkey_waiting_capture: false,
                 recent_history: Vec::new(),
-                selected_recent_index: None,
+                popup_effect_applied: false,
             }))
         }),
     )
@@ -295,8 +296,11 @@ impl eframe::App for AppState {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.main_window_open {
+            let _ = crate::window_effects::try_apply_popup_effect(frame, &mut self.popup_effect_applied);
+        }
         self.run_logic(&ctx, ui);
     }
 }
@@ -401,10 +405,12 @@ impl AppState {
             return;
         }
 
-        // Fill the entire viewport with the popup background color.
-        // We set it on the panel directly since wgpu per-pixel transparency
-        // is unreliable on Windows — this avoids black areas and corners.
-        let bg_color = egui::Color32::from_rgb(30, 30, 30);
+        // With DWM acrylic/mica, a lighter fill lets the desktop show through.
+        let bg_color = if self.popup_effect_applied {
+            egui::Color32::from_rgba_unmultiplied(24, 24, 28, 100)
+        } else {
+            crate::theme::popup_panel_fill()
+        };
         ui.painter()
             .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
 
@@ -446,12 +452,10 @@ impl AppState {
         self.captured_value = 0.0;
         self.search_query.clear();
         self.search_query_lower.clear();
-        self.selected_recent_index = None;
     }
 
     fn load_recent_history(&mut self) {
         self.recent_history = crate::history::list_recent(10).unwrap_or_default();
-        self.selected_recent_index = None;
     }
 
     /// Shows the converter popup at the cursor (clipboard capture is optional and separate).
@@ -724,15 +728,6 @@ impl AppState {
 
         ui.add_space(5.0);
 
-        if self.current_result.is_none()
-            && matches!(
-                self.current_mode,
-                WindowMode::ValueInput | WindowMode::SourceUnitSelection
-            )
-        {
-            self.render_recent_history(ui);
-        }
-
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {
                 let response = ui
@@ -756,6 +751,10 @@ impl AppState {
                     self.focus_main_input = true;
                 }
             });
+
+            if self.current_result.is_none() {
+                self.render_recent_history(ui, ctx);
+            }
         } else {
             ui.horizontal(|ui| {
                 let response = ui.add(
@@ -1007,65 +1006,79 @@ impl AppState {
         }
     }
 
-    fn render_recent_history(&mut self, ui: &mut egui::Ui) {
+    fn render_recent_history(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if self.recent_history.is_empty() {
             return;
         }
 
-        let selected_text = self
-            .selected_recent_index
-            .and_then(|idx| self.recent_history.get(idx))
-            .map_or_else(
-                || "Recent conversions…".to_string(),
-                Self::format_history_label,
-            );
+        ui.label(
+            egui::RichText::new("Recent")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
 
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Recent")
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
-            egui::ComboBox::from_id_salt("recent_conversions")
-                .selected_text(selected_text)
-                .width(ui.available_width() - 8.0)
-                .show_ui(ui, |ui| {
-                    for (idx, item) in self.recent_history.iter().enumerate() {
-                        let label = Self::format_history_label(item);
-                        if ui
-                            .selectable_value(&mut self.selected_recent_index, Some(idx), label)
-                            .clicked()
-                        {
-                            ui.close();
+        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let max_list_height = row_height * 5.5;
+
+        egui::ScrollArea::vertical()
+            .id_salt("recent_conversions_list")
+            .max_height(max_list_height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_width(ui.max_rect().width());
+                for item in self.recent_history.clone() {
+                    ui.horizontal(|ui| {
+                        let row = Self::history_row(ui, &item);
+                        if row.clicked() {
+                            self.reopen_history_item(&item);
+                            ctx.request_repaint();
                         }
-                    }
-                });
-        });
 
-        if let Some(idx) = self.selected_recent_index
-            && let Some(item) = self.recent_history.get(idx).cloned()
-        {
-            ui.horizontal(|ui| {
-                if ui.button("Copy output").clicked() {
-                    let text = Self::history_output_text(&item);
-                    if self.clipboard.set_text(text).is_ok() {
-                        self.copied_notification =
-                            Some(("Copied!".to_string(), Instant::now()));
-                    }
-                }
-                if ui.button("Reopen").clicked() {
-                    self.reopen_history_item(&item);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Copy").clicked() {
+                                let text = Self::history_output_text(&item);
+                                if self.clipboard.set_text(text).is_ok() {
+                                    self.copied_notification =
+                                        Some(("Copied!".to_string(), Instant::now()));
+                                }
+                            }
+                        });
+                    });
                 }
             });
-            ui.add_space(4.0);
-        }
+
+        ui.add_space(6.0);
     }
 
-    fn format_history_label(item: &HistoryItem) -> String {
-        format!(
-            "{:.1} {} → {:.1} {}",
-            item.input_value, item.input_unit, item.output_value, item.output_unit
-        )
+    /// Renders one recent row with a painted arrow (default font lacks Unicode →).
+    fn history_row(ui: &mut egui::Ui, item: &HistoryItem) -> egui::Response {
+        let weak = ui.visuals().weak_text_color();
+        let row_height = ui.spacing().interact_size.y;
+        let width = ui.available_width();
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::CLICK);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{:.1} {}", item.input_value, item.input_unit));
+                let (arrow_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(22.0, 14.0), egui::Sense::empty());
+                Self::paint_right_arrow(ui, arrow_rect, weak);
+                ui.label(format!("{:.1} {}", item.output_value, item.output_unit));
+            });
+        });
+        response
+    }
+
+    fn paint_right_arrow(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+        let stroke = egui::Stroke::new(1.5, color);
+        let y = rect.center().y;
+        let left = rect.left() + 2.0;
+        let right = rect.right() - 2.0;
+        let tip = rect.right() - 6.0;
+        let p = ui.painter();
+        p.line_segment([egui::pos2(left, y), egui::pos2(right, y)], stroke);
+        p.line_segment([egui::pos2(right, y), egui::pos2(tip, y - 4.0)], stroke);
+        p.line_segment([egui::pos2(right, y), egui::pos2(tip, y + 4.0)], stroke);
     }
 
     fn history_output_text(item: &HistoryItem) -> String {

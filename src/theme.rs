@@ -1,15 +1,29 @@
 use eframe::egui;
 
+/// Popup panel background alpha (0–255). Lower = more see-through.
+/// On Windows, acrylic/mica from `window_effects` carries most of the glass look.
+pub const POPUP_BG_ALPHA: u8 = 200;
+
+/// Semi-transparent fill for the converter popup (requires viewport transparency).
+#[must_use]
+pub fn popup_panel_fill() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(24, 24, 28, POPUP_BG_ALPHA)
+}
+
 /// Applies a modern dark theme to the egui context.
 pub fn apply_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
 
-    // Modern dark color palette
-    visuals.panel_fill = egui::Color32::from_rgb(18, 18, 18);
-    visuals.window_fill = egui::Color32::from_rgb(24, 24, 24);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(12, 12, 12);
+    // Modern dark color palette (alpha for popup over desktop)
+    visuals.panel_fill = egui::Color32::from_rgba_unmultiplied(18, 18, 18, POPUP_BG_ALPHA);
+    visuals.window_fill = egui::Color32::from_rgba_unmultiplied(24, 24, 28, POPUP_BG_ALPHA);
+    visuals.extreme_bg_color = egui::Color32::from_rgba_unmultiplied(12, 12, 12, POPUP_BG_ALPHA);
 
     // Borders and separators
+    visuals.widgets.inactive.bg_fill =
+        egui::Color32::from_rgba_unmultiplied(35, 35, 40, POPUP_BG_ALPHA);
+    visuals.widgets.hovered.bg_fill =
+        egui::Color32::from_rgba_unmultiplied(45, 45, 52, POPUP_BG_ALPHA);
     visuals.widgets.noninteractive.bg_stroke =
         egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45));
     visuals.widgets.noninteractive.fg_stroke =
