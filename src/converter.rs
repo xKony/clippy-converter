@@ -8,26 +8,36 @@ pub struct Converter {
     config: Config,
     /// Database handle for currency rates and units.
     db: Db,
+    /// Cached unit list to avoid repeated full-table reads during UI frames.
+    units_cache: Option<Vec<UnitInfo>>,
 }
 
 impl Converter {
     /// Creates a new `Converter` with the provided configuration and database handle.
     #[must_use]
     pub const fn new(config: Config, db: Db) -> Self {
-        Self { config, db }
+        Self {
+            config,
+            db,
+            units_cache: None,
+        }
     }
 
     /// Returns a list of all supported units with their aliases.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
-    pub fn get_all_units(&self) -> Result<Vec<UnitInfo>> {
+    pub fn get_all_units(&mut self) -> Result<Vec<UnitInfo>> {
+        if let Some(cached) = &self.units_cache {
+            return Ok(cached.clone());
+        }
         let unit_map = self.db.get_all_units_with_aliases()?;
         let mut result: Vec<UnitInfo> = unit_map
             .into_iter()
             .map(|(symbol, aliases)| UnitInfo { symbol, aliases })
             .collect();
         result.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        self.units_cache = Some(result.clone());
         Ok(result)
     }
 

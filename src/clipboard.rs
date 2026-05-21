@@ -43,8 +43,8 @@ impl ClipboardManager {
         );
         let _ = self.clipboard.set_text(marker.clone());
 
-        // Give the OS a tiny moment to register the new clipboard state
-        thread::sleep(Duration::from_millis(10));
+        // Brief yield so the OS registers the marker before Ctrl+C
+        thread::sleep(Duration::from_millis(5));
 
         // 3. Trigger Ctrl+C
         #[cfg(target_os = "macos")]
@@ -72,15 +72,25 @@ impl ClipboardManager {
         // 4. Poll clipboard until the content changes from the marker
         let start_time = Instant::now();
         let mut captured_text = String::new();
+        let mut polls: u32 = 0;
 
-        while start_time.elapsed() < Duration::from_millis(500) {
+        while start_time.elapsed() < Duration::from_millis(300) {
             if let Ok(text) = self.clipboard.get_text()
                 && text != marker
             {
                 captured_text = text;
                 break;
             }
-            thread::sleep(Duration::from_millis(2));
+            polls = polls.saturating_add(1);
+            // Tight spin for the first few polls; most copies complete quickly
+            let delay = match polls {
+                0..=8 => Duration::ZERO,
+                9..=20 => Duration::from_millis(1),
+                _ => Duration::from_millis(2),
+            };
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
         }
 
         // 5. Restore original content if it existed

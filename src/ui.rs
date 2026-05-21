@@ -7,7 +7,7 @@ use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
@@ -83,6 +83,13 @@ pub struct AppState {
     pub config_crypto_interval_str: String,
 
     pub history_tx: tokio::sync::mpsc::UnboundedSender<HistoryLogEntry>,
+
+    /// Signals the background clipboard worker to capture the current selection.
+    capture_req_tx: Sender<()>,
+    /// Receives captured selection text from the background worker.
+    capture_res_rx: Receiver<anyhow::Result<String>>,
+    /// True while waiting for background clipboard capture after a hotkey press.
+    pub capture_pending: bool,
 }
 
 /// Runs the eframe application.
@@ -108,7 +115,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_resizable(false)
             .with_inner_size([350.0, 420.0]),
         run_and_return: false,
-        vsync: true,
+        vsync: false,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -137,6 +144,18 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let crypto_str = config.crypto_update_interval_mins.to_string();
 
     let (tx, rx) = mpsc::channel();
+
+    let (capture_req_tx, capture_req_rx) = mpsc::channel::<()>();
+    let (capture_res_tx, capture_res_rx) = mpsc::channel::<anyhow::Result<String>>();
+    std::thread::spawn(move || {
+        let Ok(mut worker_clipboard) = ClipboardManager::new() else {
+            return;
+        };
+        while capture_req_rx.recv().is_ok() {
+            let result = worker_clipboard.capture_selection();
+            let _ = capture_res_tx.send(result);
+        }
+    });
 
     let shared_config: SharedConfig =
         std::sync::Arc::new(std::sync::RwLock::new(config.clone()));
@@ -252,6 +271,10 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
                 history_tx,
+
+                capture_req_tx,
+                capture_res_rx,
+                capture_pending: false,
             }))
         }),
     )
@@ -280,9 +303,15 @@ impl AppState {
                     self.settings_window_open = true;
                 }
                 EventMsg::HotkeyTriggered => {
-                    self.handle_hotkey(ctx);
+                    self.show_converter_window(ctx);
+                    let _ = self.capture_req_tx.send(());
                 }
             }
+        }
+
+        if let Ok(capture_result) = self.capture_res_rx.try_recv() {
+            self.apply_capture_result(capture_result);
+            ctx.request_repaint();
         }
 
         // Settings rendered as an egui::Window inside the root viewport.
@@ -387,10 +416,41 @@ impl AppState {
         }
     }
 
-    fn handle_hotkey(&mut self, ctx: &egui::Context) {
-        let parsed_opt = self
-            .clipboard
-            .capture_selection()
+    /// Shows the converter popup immediately at the cursor (does not block on clipboard).
+    fn show_converter_window(&mut self, ctx: &egui::Context) {
+        self.capture_pending = true;
+        self.current_result = None;
+        self.current_mode = WindowMode::ValueInput;
+        self.manual_input_value = String::new();
+        self.captured_value = 0.0;
+        self.search_query.clear();
+        self.search_query_lower.clear();
+
+        let (x, y) = self.clipboard.cursor_position();
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Screen coordinates fit in f32 mantissa"
+        )]
+        {
+            self.main_window_pos = egui::pos2(x as f32, y as f32);
+        }
+
+        self.main_window_open = true;
+        self.main_window_was_focused = false;
+        self.focus_main_input = true;
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    /// Applies text captured in the background worker (parse, convert, update mode).
+    fn apply_capture_result(&mut self, capture_result: anyhow::Result<String>) {
+        self.capture_pending = false;
+
+        let parsed_opt = capture_result
             .ok()
             .and_then(|text| crate::parser::parse_input(&text).ok());
 
@@ -415,28 +475,7 @@ impl AppState {
             self.current_mode = WindowMode::ValueInput;
             self.manual_input_value = String::new();
         }
-
-        self.search_query = String::new();
-        self.search_query_lower = String::new();
-
-        let (x, y) = self.clipboard.cursor_position();
-
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "Screen coordinates fit in f32 mantissa"
-        )]
-        {
-            self.main_window_pos = egui::pos2(x as f32, y as f32);
-        }
-
-        self.main_window_open = true;
-        self.main_window_was_focused = false;
         self.focus_main_input = true;
-
-        // The converter popup is the root viewport — send commands to ROOT
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -584,6 +623,13 @@ impl AppState {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match self.current_mode {
+                    WindowMode::ValueInput if self.capture_pending => {
+                        ui.label(
+                            egui::RichText::new("Reading selection…")
+                                .strong()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
                     WindowMode::ValueInput => {
                         ui.label(egui::RichText::new("Enter value").strong());
                     }
@@ -648,13 +694,18 @@ impl AppState {
 
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {
-                let response = ui.add(
+                let response = ui.add_enabled(
+                    !self.capture_pending,
                     egui::TextEdit::singleline(&mut self.manual_input_value)
-                        .hint_text("0.00")
+                        .hint_text(if self.capture_pending {
+                            "…"
+                        } else {
+                            "0.00"
+                        })
                         .font(egui::TextStyle::Heading)
                         .desired_width(f32::INFINITY),
                 );
-                if self.focus_main_input {
+                if self.focus_main_input && !self.capture_pending {
                     response.request_focus();
                     self.focus_main_input = false;
                 }
