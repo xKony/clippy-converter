@@ -3,6 +3,7 @@
 pub mod api;
 pub mod clipboard;
 pub mod converter;
+pub mod format;
 pub mod db;
 pub mod history;
 pub mod hotkey;

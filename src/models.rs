@@ -24,6 +24,22 @@ pub struct Config {
     pub fiat_update_interval_mins: u64,
     /// Interval for refreshing cryptocurrency rates in minutes.
     pub crypto_update_interval_mins: u64,
+    /// How to group thousands in displayed numbers (not used when copying).
+    #[serde(default)]
+    pub thousand_separator: ThousandSeparator,
+}
+
+/// Visual grouping of digits in displayed numbers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThousandSeparator {
+    /// No grouping (e.g. `1234567.89`).
+    #[default]
+    None,
+    /// Space-separated (e.g. `1 234 567.89`).
+    Space,
+    /// Comma-separated (e.g. `1,234,567.89`).
+    Comma,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -64,6 +80,7 @@ impl Default for Config {
             history_retention: HistoryRetention::ThirtyDays,
             fiat_update_interval_mins: 1440, // Daily
             crypto_update_interval_mins: 60, // Every hour
+            thousand_separator: ThousandSeparator::None,
         }
     }
 }

@@ -3,7 +3,8 @@ use crate::converter::Converter;
 use crate::db::Db;
 use crate::history::HistoryItem;
 use crate::hotkey;
-use crate::models::{Config, ConversionResult, HistoryRetention, UnitInfo};
+use crate::format::{format_copy, format_display};
+use crate::models::{Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo};
 use crate::placement;
 use crate::workers::SharedConfig;
 use anyhow::{Context, Result};
@@ -295,6 +296,10 @@ impl eframe::App for AppState {
 }
 
 impl AppState {
+    fn fmt_num(&self, value: f64, precision: usize) -> String {
+        format_display(value, precision, self.config.thousand_separator)
+    }
+
     fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
@@ -549,6 +554,27 @@ impl AppState {
 
         ui.separator();
 
+        ui.label("Thousand separators (display only)");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.config.thousand_separator,
+                ThousandSeparator::None,
+                "Off",
+            );
+            ui.selectable_value(
+                &mut self.config.thousand_separator,
+                ThousandSeparator::Space,
+                "Spaces",
+            );
+            ui.selectable_value(
+                &mut self.config.thousand_separator,
+                ThousandSeparator::Comma,
+                "Commas",
+            );
+        });
+
+        ui.separator();
+
         ui.checkbox(&mut self.config.history_enabled, "Enable History Logging");
         if self.config.history_enabled {
             ui.horizontal(|ui| {
@@ -655,7 +681,7 @@ impl AppState {
                     WindowMode::SourceUnitSelection => {
                         if ui
                             .button(
-                                egui::RichText::new(format!("{:.4}", self.captured_value)).strong(),
+                                egui::RichText::new(self.fmt_num(self.captured_value, 4)).strong(),
                             )
                             .clicked()
                         {
@@ -672,7 +698,7 @@ impl AppState {
                         if let Some(res) = &self.current_result {
                             if ui
                                 .button(
-                                    egui::RichText::new(format!("{:.2}", res.input_value)).strong(),
+                                    egui::RichText::new(self.fmt_num(res.input_value, 2)).strong(),
                                 )
                                 .clicked()
                             {
@@ -872,7 +898,7 @@ impl AppState {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
                                             ui.label(
-                                                egui::RichText::new(format!("{:.4}", output.value))
+                                                egui::RichText::new(self.fmt_num(output.value, 4))
                                                     .strong()
                                                     .size(18.0),
                                             );
@@ -948,7 +974,7 @@ impl AppState {
                                                             Instant::now(),
                                                         ));
                                                     } else {
-                                                        let val_str = output.value.to_string();
+                                                        let val_str = format_copy(output.value);
                                                         if self.clipboard.set_text(val_str).is_ok()
                                                         {
                                                             self.copied_notification = Some((
@@ -1011,7 +1037,7 @@ impl AppState {
                 ui.set_width(ui.max_rect().width());
                 for item in self.recent_history.clone() {
                     ui.horizontal(|ui| {
-                        let row = Self::history_row(ui, &item);
+                        let row = self.history_row(ui, &item);
                         if row.clicked() {
                             self.reopen_history_item(&item);
                             ctx.request_repaint();
@@ -1034,7 +1060,7 @@ impl AppState {
     }
 
     /// Renders one recent row with a painted arrow (default font lacks Unicode →).
-    fn history_row(ui: &mut egui::Ui, item: &HistoryItem) -> egui::Response {
+    fn history_row(&self, ui: &mut egui::Ui, item: &HistoryItem) -> egui::Response {
         let weak = ui.visuals().weak_text_color();
         let row_height = ui.spacing().interact_size.y;
         let width = ui.available_width();
@@ -1042,11 +1068,19 @@ impl AppState {
             ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::CLICK);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("{:.1} {}", item.input_value, item.input_unit));
+                ui.label(format!(
+                    "{} {}",
+                    self.fmt_num(item.input_value, 1),
+                    item.input_unit
+                ));
                 let (arrow_rect, _) =
                     ui.allocate_exact_size(egui::vec2(22.0, 14.0), egui::Sense::empty());
                 Self::paint_right_arrow(ui, arrow_rect, weak);
-                ui.label(format!("{:.1} {}", item.output_value, item.output_unit));
+                ui.label(format!(
+                    "{} {}",
+                    self.fmt_num(item.output_value, 1),
+                    item.output_unit
+                ));
             });
         });
         response
@@ -1065,7 +1099,11 @@ impl AppState {
     }
 
     fn history_output_text(item: &HistoryItem) -> String {
-        format!("{:.4} {}", item.output_value, item.output_unit)
+        format!(
+            "{} {}",
+            format_copy(item.output_value),
+            item.output_unit
+        )
     }
 
     fn reopen_history_item(&mut self, item: &HistoryItem) {
