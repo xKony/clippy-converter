@@ -98,6 +98,35 @@ pub struct AppState {
     pub recent_history: Vec<HistoryItem>,
 }
 
+const CONVERTER_INNER_SIZE: egui::Vec2 = egui::vec2(350.0, 420.0);
+const SETTINGS_INNER_SIZE: egui::Vec2 = egui::vec2(440.0, 560.0);
+const SETTINGS_MIN_INNER_SIZE: egui::Vec2 = egui::vec2(380.0, 420.0);
+
+fn apply_converter_viewport(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+        egui::WindowLevel::AlwaysOnTop,
+    ));
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(CONVERTER_INNER_SIZE));
+}
+
+fn apply_settings_viewport(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SETTINGS_INNER_SIZE));
+    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(SETTINGS_MIN_INNER_SIZE));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+        "Clippy Converter - Settings".into(),
+    ));
+    ctx.send_viewport_cmd(egui::ViewportCommand::EnableButtons {
+        close: true,
+        minimized: true,
+        maximize: true,
+    });
+}
+
 /// Runs the eframe application.
 ///
 /// # Errors
@@ -308,6 +337,9 @@ impl AppState {
                 }
                 EventMsg::OpenSettings => {
                     self.settings_window_open = true;
+                    apply_settings_viewport(ctx);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 EventMsg::HotkeyTriggered => {
                     self.reset_converter_popup_state();
@@ -338,36 +370,31 @@ impl AppState {
         // NOTE: show_viewport_immediate is NOT supported by the wgpu renderer
         // and will panic. Using an egui::Window avoids spawning a child OS window.
         if self.settings_window_open {
-            // Ensure the root viewport is visible so the settings window can be seen
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            // Resize root viewport to fit settings content
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 500.0)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title("Clippy Converter - Settings".into()));
 
             let bg_color = egui::Color32::from_rgb(24, 24, 24);
             ui.painter()
                 .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
 
-            let content_frame = egui::Frame {
-                fill: egui::Color32::TRANSPARENT,
-                inner_margin: egui::Margin::same(16),
-                ..Default::default()
-            };
-            content_frame.show(ui, |ui| {
-                self.render_settings(ui, ctx);
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(ui.max_rect().width());
+                    let content_frame = egui::Frame {
+                        fill: egui::Color32::TRANSPARENT,
+                        inner_margin: egui::Margin::same(16),
+                        ..Default::default()
+                    };
+                    content_frame.show(ui, |ui| {
+                        self.render_settings(ui, ctx);
+                    });
+                });
 
-            // Check if user closed the window via OS close button
             if ctx.input(|i| i.viewport().close_requested()) {
                 self.settings_window_open = false;
-                // Cancel the close so the daemon keeps running
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                // Restore the root viewport to its converter configuration
-                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(350.0, 420.0)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                apply_converter_viewport(ctx);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(self.main_window_open));
             }
 
             return;
@@ -380,8 +407,7 @@ impl AppState {
             return;
         }
 
-        // Ensure converter mode viewport settings are applied
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+        apply_converter_viewport(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
@@ -457,6 +483,7 @@ impl AppState {
         self.main_window_was_focused = false;
         self.focus_main_input = true;
 
+        apply_converter_viewport(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -547,10 +574,13 @@ impl AppState {
             "Read selected text on hotkey",
         );
         ui.label(
-            egui::RichText::new("Unchecked: Quick convert opens empty. Checked: copies selection first.")
-                .small()
-                .color(ui.visuals().weak_text_color()),
+            egui::RichText::new(
+                "Unchecked: Quick convert opens empty. Checked: copies selection first.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
         );
+        ui.add_space(2.0);
 
         ui.separator();
 
@@ -613,10 +643,17 @@ impl AppState {
         ui.label("Update Intervals (minutes)");
         ui.horizontal(|ui| {
             ui.label("Fiat:");
-            ui.text_edit_singleline(&mut self.config_fiat_interval_str);
-            ui.separator();
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config_fiat_interval_str)
+                    .desired_width(72.0),
+            );
+        });
+        ui.horizontal(|ui| {
             ui.label("Crypto:");
-            ui.text_edit_singleline(&mut self.config_crypto_interval_str);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config_crypto_interval_str)
+                    .desired_width(72.0),
+            );
         });
 
         ui.separator();
