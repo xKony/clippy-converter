@@ -5,11 +5,20 @@ pub const POPUP_HEIGHT: f32 = 420.0;
 const CURSOR_OFFSET: i32 = 12;
 
 /// Returns the outer position for the converter popup near the cursor, clamped to the monitor work area.
+///
+/// Both the cursor and the returned position are in physical screen pixels.
+/// `pixels_per_point` converts the popup's logical size into physical pixels so
+/// the clamp accounts for display scaling.
 #[must_use]
-pub fn popup_position_at_cursor(cursor: (i32, i32)) -> egui::Pos2 {
+pub fn popup_position_at_cursor(cursor: (i32, i32), pixels_per_point: f32) -> egui::Pos2 {
     let x = cursor.0.saturating_add(CURSOR_OFFSET);
     let y = cursor.1.saturating_add(CURSOR_OFFSET);
-    clamp_to_work_area(x, y, POPUP_WIDTH, POPUP_HEIGHT)
+    clamp_to_work_area(
+        x,
+        y,
+        POPUP_WIDTH * pixels_per_point,
+        POPUP_HEIGHT * pixels_per_point,
+    )
 }
 
 #[must_use]
@@ -99,7 +108,7 @@ mod tests {
 
     #[test]
     fn popup_position_applies_cursor_offset() {
-        let pos = popup_position_at_cursor((100, 200));
+        let pos = popup_position_at_cursor((100, 200), 1.0);
         assert!(pos.x >= 112.0);
         assert!(pos.y >= 212.0);
     }

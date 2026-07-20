@@ -24,7 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tray-icon = "0.19"
 open = "5.3"
 single-instance = "0.3.3"
-eframe = "0.34.1"
+eframe = { version = "0.34.1", features = ["glow"] }
 egui = "0.34.1"
 egui_extras = { version = "0.34.1", features = ["svg", "image"] }
 tracing = "0.1"

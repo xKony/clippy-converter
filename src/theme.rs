@@ -11,9 +11,9 @@ pub fn apply_theme(ctx: &egui::Context) {
 
     // Borders and separators
     visuals.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 45));
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(45, 45, 45));
     visuals.widgets.noninteractive.fg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180));
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(180, 180, 180));
 
     // Rounded corners
     visuals.window_corner_radius = egui::CornerRadius::same(12);

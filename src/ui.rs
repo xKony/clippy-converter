@@ -60,7 +60,6 @@ pub struct AppState {
     /// Bumped by rate workers; polled to invalidate the unit list cache.
     pub rates_version: RatesVersion,
     last_seen_rates_version: u64,
-    pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
     pub hotkey_manager: GlobalHotKeyManager,
@@ -82,6 +81,10 @@ pub struct AppState {
     pub main_window_open: bool,
     pub main_window_pos: egui::Pos2,
     pub settings_window_open: bool,
+    /// eframe force-shows the OS window after the first painted frame (its
+    /// white-flash workaround), overriding `with_visible(false)`. This flag
+    /// tracks the one-time re-hide issued on the first frame.
+    startup_hide_done: bool,
 
     pub focus_main_input: bool,
     pub main_window_was_focused: bool,
@@ -101,12 +104,25 @@ pub struct AppState {
     pub capture_pending: bool,
     /// Hotkey fired with read-selection enabled; popup opens after capture completes.
     hotkey_waiting_capture: bool,
+    /// Signals the background worker to (re)load recent history from disk.
+    recent_req_tx: Sender<()>,
+    /// Receives freshly loaded recent history entries from the background worker.
+    recent_res_rx: Receiver<Vec<HistoryItem>>,
     pub recent_history: Vec<HistoryItem>,
+
+    /// Query for which [`Self::unit_filter_results`] was computed; `None` forces a recompute.
+    unit_filter_query: Option<String>,
+    /// Memoized, favorites-first, truncated unit list for the unit picker.
+    unit_filter_results: Vec<UnitInfo>,
 }
 
 const CONVERTER_INNER_SIZE: egui::Vec2 = egui::vec2(350.0, 420.0);
 const SETTINGS_INNER_SIZE: egui::Vec2 = egui::vec2(440.0, 560.0);
 const SETTINGS_MIN_INNER_SIZE: egui::Vec2 = egui::vec2(380.0, 420.0);
+/// How long the "Copied!" notification stays visible.
+const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(2);
+/// How many recent conversions to show in the popup.
+const RECENT_HISTORY_LIMIT: usize = 10;
 
 fn apply_converter_viewport(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
@@ -157,7 +173,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
         run_and_return: false,
         vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
-        renderer: eframe::Renderer::Wgpu,
+        // Glow (OpenGL) instead of Wgpu: the DX12 backend wgpu selects on
+        // Windows allocates ~200+ MB of GPU memory pools for this tiny popup.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
@@ -189,15 +207,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let (capture_req_tx, capture_req_rx) = mpsc::channel::<()>();
     let (capture_res_tx, capture_res_rx) = mpsc::channel::<anyhow::Result<String>>();
-    std::thread::spawn(move || {
-        let Ok(mut worker_clipboard) = ClipboardManager::new() else {
-            return;
-        };
-        while capture_req_rx.recv().is_ok() {
-            let result = worker_clipboard.capture_selection();
-            let _ = capture_res_tx.send(result);
-        }
-    });
+
+    let (recent_req_tx, recent_req_rx) = mpsc::channel::<()>();
+    let (recent_res_tx, recent_res_rx) = mpsc::channel::<Vec<HistoryItem>>();
 
     let (config_tx, config_rx) = tokio::sync::watch::channel(config.clone());
     let rates_version = crate::workers::new_rates_version();
@@ -211,7 +223,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     // Spawn tokio runtime for background workers
     std::thread::spawn({
         let db_fiat = db.clone();
-        let db_crypto = db.clone();
+        let db_crypto = db;
         let config_fiat = config_rx.clone();
         let config_crypto = config_rx;
         let rates_fiat = rates_version.clone();
@@ -294,6 +306,33 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 }
             });
 
+            // Clipboard capture worker: owns its own clipboard handle and wakes the
+            // UI as soon as a capture completes, so the popup doesn't wait for the
+            // next incidental OS event to process the result.
+            let ctx_capture = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                let Ok(mut worker_clipboard) = ClipboardManager::new() else {
+                    return;
+                };
+                while capture_req_rx.recv().is_ok() {
+                    let result = worker_clipboard.capture_selection();
+                    let _ = capture_res_tx.send(result);
+                    ctx_capture.request_repaint();
+                }
+            });
+
+            // History loader: reads the (potentially large) history file off the
+            // UI thread so opening the popup never blocks on disk I/O.
+            let ctx_history = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                while recent_req_rx.recv().is_ok() {
+                    let items =
+                        crate::history::list_recent(RECENT_HISTORY_LIMIT).unwrap_or_default();
+                    let _ = recent_res_tx.send(items);
+                    ctx_history.request_repaint();
+                }
+            });
+
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
             crate::theme::apply_theme(&cc.egui_ctx);
@@ -303,7 +342,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 config_tx,
                 rates_version: rates_version.clone(),
                 last_seen_rates_version: 0,
-                db,
                 converter,
                 clipboard,
                 hotkey_manager,
@@ -324,6 +362,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 main_window_open: false,
                 main_window_pos: egui::Pos2::ZERO,
                 settings_window_open: false,
+                startup_hide_done: false,
 
                 focus_main_input: false,
                 main_window_was_focused: false,
@@ -338,7 +377,11 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 capture_res_rx,
                 capture_pending: false,
                 hotkey_waiting_capture: false,
+                recent_req_tx,
+                recent_res_rx,
                 recent_history: Vec::new(),
+                unit_filter_query: None,
+                unit_filter_results: Vec::new(),
             }))
         }),
     )
@@ -358,9 +401,21 @@ impl AppState {
     }
 
     fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // eframe calls `window.set_visible(true)` right after the first painted
+        // frame regardless of `with_visible(false)`, which used to leave a black
+        // always-on-top box on screen at startup. Viewport commands are applied
+        // after that force-show, so re-hiding here on the first frame wins.
+        if !self.startup_hide_done {
+            self.startup_hide_done = true;
+            if !self.main_window_open && !self.settings_window_open {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
         let rates_v = self.rates_version.load(Ordering::Relaxed);
         if rates_v != self.last_seen_rates_version {
             self.converter.invalidate_units_cache();
+            self.unit_filter_query = None;
             self.last_seen_rates_version = rates_v;
         }
 
@@ -382,7 +437,7 @@ impl AppState {
                         self.capture_pending = true;
                         let _ = self.capture_req_tx.send(());
                     } else {
-                        self.load_recent_history();
+                        self.request_recent_history();
                         self.show_converter_window(ctx);
                     }
                 }
@@ -394,18 +449,20 @@ impl AppState {
             self.apply_capture_result(capture_result);
             if waiting_show {
                 self.hotkey_waiting_capture = false;
-                self.load_recent_history();
+                self.request_recent_history();
                 self.show_converter_window(ctx);
             }
             ctx.request_repaint();
         }
 
-        // Settings rendered as an egui::Window inside the root viewport.
-        // NOTE: show_viewport_immediate is NOT supported by the wgpu renderer
-        // and will panic. Using an egui::Window avoids spawning a child OS window.
-        if self.settings_window_open {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        if let Ok(items) = self.recent_res_rx.try_recv() {
+            self.recent_history = items;
+        }
 
+        // Settings rendered inside the root viewport rather than a child OS
+        // window. Viewport visibility is commanded on transitions
+        // (EventMsg::OpenSettings), not per frame.
+        if self.settings_window_open {
             let bg_color = egui::Color32::from_rgb(24, 24, 24);
             ui.painter()
                 .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, bg_color);
@@ -434,15 +491,12 @@ impl AppState {
             return;
         }
 
-        // The main converter popup is the ROOT viewport itself.
-        // When not open, hide it. When open, render the converter UI.
+        // The main converter popup is the ROOT viewport itself. Visibility and
+        // viewport style are commanded on transitions (show/close), not per frame,
+        // to avoid issuing OS window calls on every repaint.
         if !self.main_window_open {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             return;
         }
-
-        apply_converter_viewport(ctx);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
         if !focused && self.main_window_was_focused {
@@ -478,16 +532,15 @@ impl AppState {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
             && let Some(first_output) = result.outputs.first()
-        {
-            if let Err(err) = self.history_tx.try_send(HistoryLogEntry {
+            && let Err(err) = self.history_tx.try_send(HistoryLogEntry {
                 input_value: result.input_value,
                 input_unit: result.input_unit.clone(),
                 output_value: first_output.value,
                 output_unit: first_output.unit.clone(),
                 retention_days: self.config.history_retention.to_days(),
-            }) {
-                warn!(error = %err, "history log channel full or closed; dropping entry");
-            }
+            })
+        {
+            warn!(error = %err, "history log channel full or closed; dropping entry");
         }
     }
 
@@ -501,16 +554,44 @@ impl AppState {
         self.search_query_lower.clear();
     }
 
-    fn load_recent_history(&mut self) {
-        self.recent_history = crate::history::list_recent(10).unwrap_or_default();
+    /// Asks the background worker to reload recent history; results arrive via
+    /// `recent_res_rx` and are applied in [`Self::run_logic`]. Keeps disk I/O
+    /// off the UI thread so the popup opens without waiting on the file read.
+    fn request_recent_history(&self) {
+        let _ = self.recent_req_tx.send(());
+    }
+
+    /// Recomputes the memoized unit picker list for the current search query.
+    fn recompute_unit_filter(&mut self) {
+        let mut matching: Vec<UnitInfo> = self
+            .converter
+            .all_units()
+            .map(|all_units| {
+                all_units
+                    .iter()
+                    .filter(|u| u.matches(&self.search_query_lower))
+                    .map(|u| u.info.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::sort_units_favorites_first(&mut matching, &self.config.favorites);
+        matching.truncate(self.config.list_size);
+        self.unit_filter_results = matching;
+        self.unit_filter_query = Some(self.search_query_lower.clone());
     }
 
     /// Shows the converter popup at the cursor (clipboard capture is optional and separate).
     fn show_converter_window(&mut self, ctx: &egui::Context) {
         self.capture_pending = false;
 
+        // The cursor position from the OS is in physical pixels, but
+        // `ViewportCommand::OuterPosition` expects logical points (egui-winit
+        // multiplies by pixels_per_point). Without this division the popup
+        // lands offset from the cursor on any display scale other than 100%.
         let cursor = self.clipboard.cursor_position();
-        self.main_window_pos = placement::popup_position_at_cursor(cursor);
+        let ppp = ctx.pixels_per_point();
+        let physical = placement::popup_position_at_cursor(cursor, ppp);
+        self.main_window_pos = egui::pos2(physical.x / ppp, physical.y / ppp);
 
         self.main_window_open = true;
         self.main_window_was_focused = false;
@@ -863,19 +944,13 @@ impl AppState {
                     // Borrow the cached unit list to find a match without cloning
                     // the whole table; only the matched symbol is cloned.
                     let matched_symbol = self.converter.all_units().ok().and_then(|all_units| {
-                        let exact = all_units.iter().find(|u| {
-                            u.symbol.to_lowercase() == self.search_query_lower
-                                || u.aliases
-                                    .iter()
-                                    .any(|a| a.to_lowercase() == self.search_query_lower)
-                        });
-                        let partial = all_units.iter().find(|u| {
-                            u.symbol.to_lowercase().contains(&self.search_query_lower)
-                                || u.aliases.iter().any(|a| {
-                                    a.to_lowercase().contains(&self.search_query_lower)
-                                })
-                        });
-                        exact.or(partial).map(|u| u.symbol.clone())
+                        let exact = all_units
+                            .iter()
+                            .find(|u| u.matches_exact(&self.search_query_lower));
+                        let partial = all_units
+                            .iter()
+                            .find(|u| u.matches(&self.search_query_lower));
+                        exact.or(partial).map(|u| u.info.symbol.clone())
                     });
 
                     if let Some(symbol) = matched_symbol
@@ -894,33 +969,20 @@ impl AppState {
             ui.add_space(5.0);
 
             if self.current_mode == WindowMode::SourceUnitSelection {
-                // Filter over the borrowed cache first, only cloning the
-                // (typically small) subset of units that actually match.
-                let mut matching_units: Vec<UnitInfo> = self
-                    .converter
-                    .all_units()
-                    .map(|all_units| {
-                        all_units
-                            .iter()
-                            .filter(|u| {
-                                u.symbol.to_lowercase().contains(&self.search_query_lower)
-                                    || u.aliases.iter().any(|a| {
-                                        a.to_lowercase().contains(&self.search_query_lower)
-                                    })
-                            })
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Self::sort_units_favorites_first(&mut matching_units, &self.config.favorites);
-                matching_units.truncate(self.config.list_size);
+                // The filtered list is memoized and only recomputed when the query
+                // changes (or the memo is invalidated by a rate refresh or a
+                // favorites change), instead of re-filtering every frame.
+                if self.unit_filter_query.as_deref() != Some(self.search_query_lower.as_str()) {
+                    self.recompute_unit_filter();
+                }
 
+                let mut clicked_symbol: Option<String> = None;
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
-                            for unit in matching_units {
+                            for unit in &self.unit_filter_results {
                                 let aliases_str = if unit.aliases.is_empty() {
                                     String::new()
                                 } else {
@@ -935,19 +997,23 @@ impl AppState {
                                             .fill(egui::Color32::TRANSPARENT),
                                     )
                                     .clicked()
-                                    && let Ok(result) =
-                                        self.converter.convert(self.captured_value, &unit.symbol)
                                 {
-                                    self.current_result = Some(result);
-                                    self.current_mode = WindowMode::Results;
-                                    self.search_query.clear();
-                                    self.search_query_lower.clear();
-                                    self.log_conversion_if_enabled();
-                                    self.focus_main_input = true;
+                                    clicked_symbol = Some(unit.symbol.clone());
                                 }
                             }
                         });
                     });
+
+                if let Some(symbol) = clicked_symbol
+                    && let Ok(result) = self.converter.convert(self.captured_value, &symbol)
+                {
+                    self.current_result = Some(result);
+                    self.current_mode = WindowMode::Results;
+                    self.search_query.clear();
+                    self.search_query_lower.clear();
+                    self.log_conversion_if_enabled();
+                    self.focus_main_input = true;
+                }
             } else if self.current_mode == WindowMode::Results {
                 let outputs = if let Some(result) = &self.current_result {
                     result
@@ -1018,10 +1084,11 @@ impl AppState {
                                                             .push(output.unit.clone());
                                                     }
                                                     let _ = self.config.save();
-                                                    self.converter = Converter::new(
-                                                        self.config.clone(),
-                                                        self.db.clone(),
-                                                    );
+                                                    // Update sorting config without
+                                                    // discarding the units cache.
+                                                    self.converter
+                                                        .set_config(self.config.clone());
+                                                    self.unit_filter_query = None;
                                                 }
 
                                                 if ui
@@ -1084,7 +1151,6 @@ impl AppState {
 
         if let Some((msg, time)) = &self.copied_notification {
             let elapsed = Instant::now().duration_since(*time);
-            const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(2);
             if elapsed > NOTIFICATION_LIFETIME {
                 self.copied_notification = None;
             } else {
@@ -1101,7 +1167,7 @@ impl AppState {
                 });
                 // Wake up once the notification is due to expire, instead of
                 // repainting continuously while it is visible.
-                ctx.request_repaint_after(NOTIFICATION_LIFETIME - elapsed);
+                ctx.request_repaint_after(NOTIFICATION_LIFETIME.saturating_sub(elapsed));
             }
         }
     }
@@ -1191,7 +1257,7 @@ impl AppState {
     }
 
     fn paint_right_arrow(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
-        let stroke = egui::Stroke::new(1.5, color);
+        let stroke = egui::Stroke::new(1.5_f32, color);
         let y = rect.center().y;
         let left = rect.left() + 2.0;
         let right = rect.right() - 2.0;
@@ -1222,11 +1288,16 @@ impl AppState {
     }
 
     fn sort_units_favorites_first(units: &mut [UnitInfo], favorites: &[String]) {
+        // Build the favorite-rank lookup once instead of scanning the favorites
+        // list on every comparison.
+        let ranks: std::collections::HashMap<&str, usize> = favorites
+            .iter()
+            .enumerate()
+            .map(|(idx, fav)| (fav.as_str(), idx))
+            .collect();
         units.sort_by(|a, b| {
-            let a_fav = favorites.iter().position(|u| u == &a.symbol);
-            let b_fav = favorites.iter().position(|u| u == &b.symbol);
-            match (a_fav, b_fav) {
-                (Some(ai), Some(bi)) => ai.cmp(&bi),
+            match (ranks.get(a.symbol.as_str()), ranks.get(b.symbol.as_str())) {
+                (Some(ai), Some(bi)) => ai.cmp(bi),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.symbol.cmp(&b.symbol),
