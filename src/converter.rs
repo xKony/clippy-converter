@@ -23,22 +23,31 @@ impl Converter {
         }
     }
 
-    /// Returns a list of all supported units with their aliases.
+    /// Clears the cached unit list so the next [`Self::all_units`] call reloads from the DB.
+    ///
+    /// Call this after background rate refreshes add or update symbols.
+    pub fn invalidate_units_cache(&mut self) {
+        self.units_cache = None;
+    }
+
+    /// Returns a borrowed slice of all supported units with their aliases,
+    /// populating the internal cache on first use to avoid repeated
+    /// full-table reads and per-call allocations.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
-    pub fn get_all_units(&mut self) -> Result<Vec<UnitInfo>> {
-        if let Some(cached) = &self.units_cache {
-            return Ok(cached.clone());
+    pub fn all_units(&mut self) -> Result<&[UnitInfo]> {
+        if self.units_cache.is_none() {
+            let unit_map = self.db.get_all_units_with_aliases()?;
+            let mut result: Vec<UnitInfo> = unit_map
+                .into_iter()
+                .map(|(symbol, aliases)| UnitInfo { symbol, aliases })
+                .collect();
+            result.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            self.units_cache = Some(result);
         }
-        let unit_map = self.db.get_all_units_with_aliases()?;
-        let mut result: Vec<UnitInfo> = unit_map
-            .into_iter()
-            .map(|(symbol, aliases)| UnitInfo { symbol, aliases })
-            .collect();
-        result.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-        self.units_cache = Some(result.clone());
-        Ok(result)
+        // Cache is populated above whenever it was `None`.
+        Ok(self.units_cache.as_deref().unwrap_or(&[]))
     }
 
     /// Converts a numeric value from one unit to all compatible target units.
@@ -101,13 +110,21 @@ impl Converter {
         outputs.sort_by(|a, b| a.unit.cmp(&b.unit));
         outputs.dedup_by(|a, b| a.unit == b.unit);
 
-        // Sorting logic: favorites first
+        // Sorting logic: favorites first. Build the favorite-rank lookup once
+        // rather than scanning the favorites list on every comparison.
+        let favorite_ranks: std::collections::HashMap<&str, usize> = self
+            .config
+            .favorites
+            .iter()
+            .enumerate()
+            .map(|(idx, fav)| (fav.as_str(), idx))
+            .collect();
         outputs.sort_by(|a, b| {
-            let a_fav = self.config.favorites.iter().position(|u| u == &a.unit);
-            let b_fav = self.config.favorites.iter().position(|u| u == &b.unit);
+            let a_fav = favorite_ranks.get(a.unit.as_str());
+            let b_fav = favorite_ranks.get(b.unit.as_str());
 
             match (a_fav, b_fav) {
-                (Some(ai), Some(bi)) => ai.cmp(&bi),
+                (Some(ai), Some(bi)) => ai.cmp(bi),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.unit.cmp(&b.unit),
