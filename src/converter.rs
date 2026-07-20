@@ -2,6 +2,42 @@ use crate::db::Db;
 use crate::models::{Config, ConversionResult, ConvertedValue, UnitInfo};
 use anyhow::{Result, anyhow};
 
+/// A unit with precomputed lowercase forms so search never allocates per query.
+#[derive(Debug, Clone)]
+pub struct SearchableUnit {
+    /// The unit's display data (symbol and aliases).
+    pub info: UnitInfo,
+    /// Lowercased symbol.
+    symbol_lower: String,
+    /// Lowercased aliases.
+    aliases_lower: Vec<String>,
+}
+
+impl SearchableUnit {
+    fn new(info: UnitInfo) -> Self {
+        let symbol_lower = info.symbol.to_lowercase();
+        let aliases_lower = info.aliases.iter().map(|a| a.to_lowercase()).collect();
+        Self {
+            info,
+            symbol_lower,
+            aliases_lower,
+        }
+    }
+
+    /// Returns `true` if the lowercased query is a substring of the symbol or any alias.
+    #[must_use]
+    pub fn matches(&self, query_lower: &str) -> bool {
+        self.symbol_lower.contains(query_lower)
+            || self.aliases_lower.iter().any(|a| a.contains(query_lower))
+    }
+
+    /// Returns `true` if the lowercased query equals the symbol or any alias exactly.
+    #[must_use]
+    pub fn matches_exact(&self, query_lower: &str) -> bool {
+        self.symbol_lower == query_lower || self.aliases_lower.iter().any(|a| a == query_lower)
+    }
+}
+
 /// The core conversion engine.
 pub struct Converter {
     /// User configuration for sorting and limits.
@@ -9,7 +45,7 @@ pub struct Converter {
     /// Database handle for currency rates and units.
     db: Db,
     /// Cached unit list to avoid repeated full-table reads during UI frames.
-    units_cache: Option<Vec<UnitInfo>>,
+    units_cache: Option<Vec<SearchableUnit>>,
 }
 
 impl Converter {
@@ -23,6 +59,12 @@ impl Converter {
         }
     }
 
+    /// Replaces the configuration (e.g. after a favorites change) without
+    /// discarding the cached unit list.
+    pub fn set_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
     /// Clears the cached unit list so the next [`Self::all_units`] call reloads from the DB.
     ///
     /// Call this after background rate refreshes add or update symbols.
@@ -30,20 +72,20 @@ impl Converter {
         self.units_cache = None;
     }
 
-    /// Returns a borrowed slice of all supported units with their aliases,
-    /// populating the internal cache on first use to avoid repeated
-    /// full-table reads and per-call allocations.
+    /// Returns a borrowed slice of all supported units with their aliases and
+    /// precomputed lowercase search forms, populating the internal cache on
+    /// first use to avoid repeated full-table reads and per-call allocations.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
-    pub fn all_units(&mut self) -> Result<&[UnitInfo]> {
+    pub fn all_units(&mut self) -> Result<&[SearchableUnit]> {
         if self.units_cache.is_none() {
             let unit_map = self.db.get_all_units_with_aliases()?;
-            let mut result: Vec<UnitInfo> = unit_map
+            let mut result: Vec<SearchableUnit> = unit_map
                 .into_iter()
-                .map(|(symbol, aliases)| UnitInfo { symbol, aliases })
+                .map(|(symbol, aliases)| SearchableUnit::new(UnitInfo { symbol, aliases }))
                 .collect();
-            result.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            result.sort_by(|a, b| a.info.symbol.cmp(&b.info.symbol));
             self.units_cache = Some(result);
         }
         // Cache is populated above whenever it was `None`.

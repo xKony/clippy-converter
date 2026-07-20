@@ -813,6 +813,8 @@ mod tests {
         // typed table API.
         let write_txn = db.inner.begin_write().unwrap();
         {
+            // Create the aliases table too; `get_all_units_with_aliases` below reads it.
+            let _ = write_txn.open_table(ALIASES_TABLE).unwrap();
             let mut table = write_txn.open_table(UNITS_TABLE).unwrap();
             table
                 .insert(
