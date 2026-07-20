@@ -22,7 +22,7 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 
 **Language & Framework**
 - **Rust (Edition 2024)**
-- **egui / eframe (0.34.1)** - Immediate mode GUI framework
+- **egui / eframe (0.34.1)** - Immediate mode GUI via Glow (OpenGL); avoids wgpu's heavy DX12 memory pools on Windows
 - **tokio (1)** - Asynchronous runtime
 
 **Database & Storage**
@@ -61,6 +61,7 @@ A lightweight, background unit and currency converter with global hotkeys and lo
 │   ├── main.rs          # Application entry point and single instance lock
 │   ├── models.rs        # Core data structures and local JSON configuration logic
 │   ├── parser.rs        # String splitting and value extraction logic
+│   ├── placement.rs     # Cursor-relative popup positioning with DPI-aware work-area clamp
 │   ├── theme.rs         # UI theme and styling definitions
 │   ├── ui.rs            # egui UI state machine, floating window, and tray menu
 │   └── workers.rs       # Async tokio tasks for periodic background data refreshes

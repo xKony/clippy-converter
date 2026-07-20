@@ -13,7 +13,7 @@
 - **Language:** Rust 2024
 - **Dependencies:**
   - `anyhow`: 1.0
-  - `eframe`: 0.34.1
+  - `eframe`: 0.34.1 (features: ["glow"])
   - `egui`: 0.34.1
   - `egui_extras`: 0.34.1 (features: ["svg", "image"])
   - `global-hotkey`: 0.7.0
@@ -45,12 +45,14 @@
 - `src/main.rs`: Application entry point, tracing init, single-instance lock, eframe handoff.
 - `src/models.rs`: Core data structures and local JSON configuration logic.
 - `src/parser.rs`: String splitting and value extraction logic.
+- `src/placement.rs`: Cursor-relative popup positioning with DPI-aware monitor work-area clamp.
+- `src/theme.rs`: egui dark theme and spacing.
 - `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring.
 - `src/workers.rs`: Async Tokio tasks for periodic rate refreshes (`spawn_blocking` for redb I/O, `watch` for config).
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
-- **Rendering strategy:** egui/eframe Immediate Mode UI, running as a background daemon with borderless, always-on-top floating windows at cursor coordinates. `vsync` is enabled; repaint is event-driven (not a busy loop).
+- **Rendering strategy:** egui/eframe Immediate Mode UI via `eframe::Renderer::Glow` (OpenGL), running as a background daemon with borderless, always-on-top floating windows at cursor coordinates. Glow is used instead of wgpu because wgpu's DX12 backend on Windows allocated ~200+ MB of GPU memory pools for this small popup (~300 MB RAM); Glow stays near the ~70 MB baseline. `vsync` is enabled; repaint is event-driven (not a busy loop).
 - **Data fetching patterns:** Background Tokio workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto). Rate writes are batched in one redb transaction and run via `tokio::task::spawn_blocking`. Config interval changes use `tokio::sync::watch` so workers wake early.
 - **State management:** App state lives in `AppState`, updated in eframe's `ui`/`run_logic`. Shared config is published over a watch channel; a `RatesVersion` atomic invalidates the converter unit cache after successful refreshes.
 - **Database:** `redb` embedded key-value store for offline persistence of exchange rates and unit conversion factors.
@@ -82,3 +84,5 @@
 - **Clipboard Race Conditions:** Programmatic copy using `enigo` relies on short delays and clipboard restoration, which might be sensitive to OS-level clipboard managers.
 - **API Parsing:** Binance pairs are filtered to `*USDT` in `api.rs`, then mapped with `.strip_suffix("USDT")` in workers — pairs without a USDT quote are ignored.
 - **History prune:** Append-only on each conversion; `prune_history_if_needed` runs at startup (and at most once per calendar day) using temp-file + rename.
+- **Startup hide:** eframe force-shows the OS window after the first painted frame (white-flash workaround), overriding `with_visible(false)`. `AppState::startup_hide_done` and a one-shot `ViewportCommand::Visible(false)` in `run_logic` re-hide after that force-show so a black always-on-top box does not linger at startup.
+- **Popup DPI:** OS cursor position is in physical pixels, but `ViewportCommand::OuterPosition` expects logical points (egui-winit multiplies by `pixels_per_point`). `show_converter_window` divides by `ctx.pixels_per_point()`, and `placement::popup_position_at_cursor` takes `pixels_per_point` so the work-area clamp uses the popup's physical size — otherwise the popup is offset on Windows display scaling ≠ 100%.
