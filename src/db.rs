@@ -25,13 +25,11 @@ impl redb::Value for UnitEntry {
     where
         Self: 'a,
     {
-        bincode::deserialize(data).unwrap_or(Self {
-            factor: 1.0,
-            offset: 0.0,
-            category: 0,
-            timestamp: 0,
-            source: 0,
-        })
+        // redb's `Value` trait cannot surface a `Result`, so a failed deserialization is
+        // mapped to an unmistakable sentinel instead of a plausible-looking default (which
+        // previously masked corruption as a silent `factor: 1.0` conversion). Callers detect
+        // this via `UnitEntry::is_corrupt`.
+        bincode::deserialize(data).unwrap_or_else(|_| Self::corrupt_sentinel())
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> {
@@ -40,6 +38,31 @@ impl redb::Value for UnitEntry {
 
     fn type_name() -> redb::TypeName {
         redb::TypeName::new("UnitEntry")
+    }
+}
+
+impl UnitEntry {
+    /// Sentinel timestamp used to mark an entry that failed to deserialize.
+    const CORRUPT_TIMESTAMP: i64 = i64::MIN;
+    /// Sentinel source used to mark an entry that failed to deserialize.
+    const CORRUPT_SOURCE: u8 = u8::MAX;
+
+    /// Builds a recognizable sentinel entry for bytes that failed to deserialize.
+    const fn corrupt_sentinel() -> Self {
+        Self {
+            factor: f64::NAN,
+            offset: 0.0,
+            category: 0,
+            timestamp: Self::CORRUPT_TIMESTAMP,
+            source: Self::CORRUPT_SOURCE,
+        }
+    }
+
+    /// Returns `true` if this entry is a corruption sentinel produced when the stored bytes
+    /// failed to deserialize, rather than real conversion data.
+    #[must_use]
+    pub const fn is_corrupt(&self) -> bool {
+        self.timestamp == Self::CORRUPT_TIMESTAMP && self.source == Self::CORRUPT_SOURCE
     }
 }
 
@@ -100,6 +123,10 @@ impl Db {
     /// Updates a rate in the database. If the entry exists, it is only updated if the new
     /// data is from a higher-priority source (Crypto) or is more recent.
     ///
+    /// This is a thin wrapper around [`Db::update_rates_batch`] for a single symbol; callers
+    /// updating many symbols at once (e.g. after a bulk API refresh) should prefer the batch
+    /// method to avoid opening one write transaction per symbol.
+    ///
     /// # Errors
     /// Returns an error if the transaction fails.
     pub fn update_rate(
@@ -109,53 +136,81 @@ impl Db {
         timestamp: i64,
         source: RateSource,
     ) -> Result<()> {
+        self.update_rates_batch([(symbol.to_string(), price)], timestamp, source)?;
+        Ok(())
+    }
+
+    /// Updates many rates in a single write transaction, applying the same priority rules as
+    /// [`Db::update_rate`] (a higher-priority source, e.g. Crypto over Fiat, always wins; ties
+    /// on source are broken by the newer timestamp). All entries share the same `timestamp` and
+    /// `source`, matching a single batch API refresh.
+    ///
+    /// Intended for workers refreshing many symbols at once (e.g. all fiat or all crypto rates)
+    /// so that only one write transaction and one table handle are used for the whole batch.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction fails.
+    ///
+    /// Returns the number of symbols that were actually updated (i.e. that passed the priority
+    /// check), which may be less than the number of input rates.
+    pub fn update_rates_batch(
+        &self,
+        rates: impl IntoIterator<Item = (String, f64)>,
+        timestamp: i64,
+        source: RateSource,
+    ) -> Result<usize> {
         let write_txn = self
             .inner
             .begin_write()
             .context("Failed to begin write transaction")?;
+        let mut updated_count = 0_usize;
         {
             let mut units_table = write_txn
                 .open_table(UNITS_TABLE)
                 .context("Failed to open units table")?;
 
-            let should_update = units_table
-                .get(symbol)
-                .context("Failed to read existing unit")?
-                .is_none_or(|existing| {
-                    let existing_val: UnitEntry = existing.value();
-                    (source as u8 > existing_val.source)
-                        || (source as u8 == existing_val.source
-                            && timestamp > existing_val.timestamp)
-                });
+            for (symbol, price) in rates {
+                let should_update = units_table
+                    .get(symbol.as_str())
+                    .context("Failed to read existing unit")?
+                    .is_none_or(|existing| {
+                        let existing_val: UnitEntry = existing.value();
+                        existing_val.is_corrupt()
+                            || (source as u8 > existing_val.source)
+                            || (source as u8 == existing_val.source
+                                && timestamp > existing_val.timestamp)
+                    });
 
-            if should_update {
-                // Factor must be "EUR per 1 Unit" so that Base_EUR = Value * Factor.
-                // - Fiat rates are "Units per 1 EUR" (e.g. 1.08 USD/EUR), so Factor = 1/price.
-                // - Crypto rates are already "EUR per 1 Unit" (e.g. 60000 EUR/BTC), so Factor = price.
-                let factor = if source == RateSource::Fiat {
-                    if price == 0.0 { 0.0 } else { 1.0 / price }
-                } else {
-                    price
-                };
+                if should_update {
+                    // Factor must be "EUR per 1 Unit" so that Base_EUR = Value * Factor.
+                    // - Fiat rates are "Units per 1 EUR" (e.g. 1.08 USD/EUR), so Factor = 1/price.
+                    // - Crypto rates are already "EUR per 1 Unit" (e.g. 60000 EUR/BTC), so Factor = price.
+                    let factor = if source == RateSource::Fiat {
+                        if price == 0.0 { 0.0 } else { 1.0 / price }
+                    } else {
+                        price
+                    };
 
-                units_table
-                    .insert(
-                        symbol,
-                        UnitEntry {
-                            factor,
-                            offset: 0.0,
-                            category: UnitCategory::Currency as u8,
-                            timestamp,
-                            source: source as u8,
-                        },
-                    )
-                    .context("Failed to insert into units table")?;
+                    units_table
+                        .insert(
+                            symbol.as_str(),
+                            UnitEntry {
+                                factor,
+                                offset: 0.0,
+                                category: UnitCategory::Currency as u8,
+                                timestamp,
+                                source: source as u8,
+                            },
+                        )
+                        .context("Failed to insert into units table")?;
+                    updated_count += 1;
+                }
             }
         }
         write_txn
             .commit()
             .context("Failed to commit write transaction")?;
-        Ok(())
+        Ok(updated_count)
     }
 
     /// Returns all canonical symbols with their associated aliases.
@@ -178,9 +233,12 @@ impl Db {
 
         let mut unit_map = std::collections::HashMap::new();
 
-        // 1. Collect all canonical symbols
+        // 1. Collect all canonical symbols, skipping entries that failed to deserialize.
         for result in units_table.iter().context("Failed to iterate units")? {
-            let (key, _) = result.context("Failed to read unit row")?;
+            let (key, value) = result.context("Failed to read unit row")?;
+            if value.value().is_corrupt() {
+                continue;
+            }
             unit_map.insert(key.value().to_string(), Vec::new());
         }
 
@@ -236,7 +294,8 @@ impl Db {
     /// Retrieves a unit entry for a given symbol.
     ///
     /// # Errors
-    /// Returns an error if the read transaction fails.
+    /// Returns an error if the read transaction fails, or if the stored entry is corrupt
+    /// (i.e. failed to deserialize).
     pub fn get_unit(&self, symbol: &str) -> Result<Option<UnitEntry>> {
         let read_txn = self
             .inner
@@ -246,7 +305,13 @@ impl Db {
             .open_table(UNITS_TABLE)
             .context("Failed to open units table")?;
         let result = table.get(symbol).context("Failed to query symbol")?;
-        Ok(result.map(|r| r.value()))
+        let Some(entry) = result.map(|r| r.value()) else {
+            return Ok(None);
+        };
+        if entry.is_corrupt() {
+            return Err(anyhow::anyhow!("corrupt unit entry for {symbol}"));
+        }
+        Ok(Some(entry))
     }
 
     /// Retrieves all units belonging to a specific category.
@@ -265,6 +330,9 @@ impl Db {
         for result in table.iter().context("Failed to iterate units")? {
             let (key, value) = result.context("Failed to read unit row")?;
             let entry = value.value();
+            if entry.is_corrupt() {
+                continue;
+            }
             if entry.category == category {
                 units.push((key.value().to_string(), entry));
             }
@@ -637,6 +705,154 @@ mod tests {
         let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Crypto as u8);
         assert_eq!(entry.factor, 51000.0);
+    }
+
+    #[test]
+    fn test_update_rates_batch_applies_all_in_one_transaction() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        let rates = [
+            ("USD".to_string(), 1.08),
+            ("PLN".to_string(), 4.0),
+            ("GBP".to_string(), 0.85),
+        ];
+        let updated = db
+            .update_rates_batch(rates, 1000, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 3);
+
+        let usd = db.get_unit("USD").unwrap().unwrap();
+        assert!((usd.factor - (1.0 / 1.08)).abs() < f64::EPSILON);
+        assert_eq!(usd.source, RateSource::Fiat as u8);
+
+        let pln = db.get_unit("PLN").unwrap().unwrap();
+        assert!((pln.factor - 0.25).abs() < f64::EPSILON);
+
+        let gbp = db.get_unit("GBP").unwrap().unwrap();
+        assert!((gbp.factor - (1.0 / 0.85)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_update_rates_batch_respects_source_priority() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        // Seed BTC from the higher-priority Crypto source.
+        db.update_rate("BTC", 50000.0, 1000, RateSource::Crypto)
+            .unwrap();
+
+        // A later Fiat batch should skip BTC (lower priority) but still apply ETH (new symbol).
+        let rates = [("BTC".to_string(), 49000.0), ("ETH".to_string(), 3000.0)];
+        let updated = db
+            .update_rates_batch(rates, 2000, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let btc = db.get_unit("BTC").unwrap().unwrap();
+        assert_eq!(btc.source, RateSource::Crypto as u8);
+        assert_eq!(btc.factor, 50000.0);
+
+        let eth = db.get_unit("ETH").unwrap().unwrap();
+        assert_eq!(eth.source, RateSource::Fiat as u8);
+    }
+
+    #[test]
+    fn test_update_rates_batch_newer_timestamp_wins_within_same_source() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.update_rate("PLN", 4.0, 1000, RateSource::Fiat).unwrap();
+
+        // Newer timestamp, same source: should update.
+        let updated = db
+            .update_rates_batch([("PLN".to_string(), 4.5)], 2000, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 1);
+        let pln = db.get_unit("PLN").unwrap().unwrap();
+        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+
+        // Older timestamp, same source: should be skipped.
+        let updated = db
+            .update_rates_batch([("PLN".to_string(), 5.0)], 500, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 0);
+        let pln = db.get_unit("PLN").unwrap().unwrap();
+        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_corrupt_bytes_produce_sentinel_entry() {
+        // Fewer bytes than `UnitEntry`'s bincode encoding requires, so deserialization fails
+        // and `from_bytes` must fall back to the corruption sentinel instead of a plausible
+        // (but wrong) default.
+        let garbage = [0_u8; 3];
+        let entry = <UnitEntry as redb::Value>::from_bytes(&garbage);
+        assert!(entry.is_corrupt());
+    }
+
+    #[test]
+    fn test_get_unit_errors_on_corrupt_entry() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        // Directly insert an entry shaped like the corruption sentinel to exercise the
+        // corrupt-handling paths without needing to smuggle raw garbage bytes through redb's
+        // typed table API.
+        let write_txn = db.inner.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(UNITS_TABLE).unwrap();
+            table
+                .insert(
+                    "BAD",
+                    UnitEntry {
+                        factor: f64::NAN,
+                        offset: 0.0,
+                        category: UnitCategory::Currency as u8,
+                        timestamp: i64::MIN,
+                        source: u8::MAX,
+                    },
+                )
+                .unwrap();
+            table
+                .insert(
+                    "USD",
+                    UnitEntry {
+                        factor: 1.1,
+                        offset: 0.0,
+                        category: UnitCategory::Currency as u8,
+                        timestamp: 100,
+                        source: RateSource::Fiat as u8,
+                    },
+                )
+                .unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        assert!(db.get_unit("BAD").is_err());
+        // Non-corrupt entries remain readable.
+        assert!(db.get_unit("USD").unwrap().is_some());
+
+        // Iteration-based accessors should silently skip the corrupt entry.
+        let units = db.get_category_units(UnitCategory::Currency as u8).unwrap();
+        assert!(units.iter().any(|(sym, _)| sym == "USD"));
+        assert!(units.iter().all(|(sym, _)| sym != "BAD"));
+
+        let all = db.get_all_units_with_aliases().unwrap();
+        assert!(all.contains_key("USD"));
+        assert!(!all.contains_key("BAD"));
     }
 
     #[test]
