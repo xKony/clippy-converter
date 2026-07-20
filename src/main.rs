@@ -18,8 +18,20 @@ use anyhow::{Context, Result};
 use db::Db;
 use models::Config;
 use single_instance::SingleInstance;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
 
 fn main() -> Result<()> {
+    init_tracing();
+
     // Ensure only one instance is running
     let instance = SingleInstance::new("com.clippy.clippy-converter")
         .context("Failed to create single instance lock")?;
@@ -30,14 +42,18 @@ fn main() -> Result<()> {
         ));
     }
 
-    let config = Config::load().unwrap_or_default();
+    let config = Config::load().unwrap_or_else(|err| {
+        error!(error = %err, "failed to load config; using defaults");
+        Config::default()
+    });
 
     let db = Db::open()
         .context("Failed to open database. Check if another process is using the database file.")?;
 
-    if let Err(e) = db.init_static_units() {
-        // We can keep this as a silent error or use a log, but avoiding eprintln for now
-        let _ = e;
+    if let Err(err) = db.init_static_units() {
+        error!(error = %err, "failed to initialize static units");
+    } else {
+        info!("static units initialized");
     }
 
     ui::run(config, db)

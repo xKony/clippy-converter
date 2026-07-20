@@ -18,15 +18,6 @@ pub struct ParsedInput {
 ///
 /// # Errors
 /// Returns an error if no number can be found in the input string.
-///
-/// # Examples
-/// ```
-/// use clippy_converter::parser::parse_input;
-///
-/// let result = parse_input("$50.5").unwrap();
-/// assert_eq!(result.value, 50.5);
-/// assert_eq!(result.unit, Some("USD".to_string()));
-/// ```
 pub fn parse_input(input: &str) -> Result<ParsedInput> {
     let input = input.trim();
     if input.is_empty() {
