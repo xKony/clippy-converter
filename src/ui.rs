@@ -6,12 +6,14 @@ use crate::hotkey;
 use crate::format::{format_copy, format_display};
 use crate::models::{Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo};
 use crate::placement;
-use crate::workers::SharedConfig;
+use crate::workers::{ConfigWatchTx, RatesVersion};
 use anyhow::{Context, Result};
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+use tracing::{error, warn};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -53,7 +55,11 @@ impl std::fmt::Display for HistoryRetention {
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     pub config: Config,
-    pub shared_config: SharedConfig,
+    /// Publishes config changes so background workers wake and pick up new intervals.
+    pub config_tx: ConfigWatchTx,
+    /// Bumped by rate workers; polled to invalidate the unit list cache.
+    pub rates_version: RatesVersion,
+    last_seen_rates_version: u64,
     pub db: Db,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
@@ -85,7 +91,7 @@ pub struct AppState {
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
 
-    pub history_tx: tokio::sync::mpsc::UnboundedSender<HistoryLogEntry>,
+    pub history_tx: tokio::sync::mpsc::Sender<HistoryLogEntry>,
 
     /// Signals the background clipboard worker to capture the current selection.
     capture_req_tx: Sender<()>,
@@ -149,7 +155,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_resizable(false)
             .with_inner_size([350.0, 420.0]),
         run_and_return: false,
-        vsync: false,
+        vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -160,7 +166,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let hotkey_manager =
         GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
     let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
-    let _ = hotkey_manager.register(hk);
+    if let Err(err) = hotkey_manager.register(hk) {
+        warn!(error = %err, "failed to register global hotkey");
+    }
 
     let tray_menu = Menu::with_items(&[
         &MenuItem::with_id("settings", "Settings", true, None),
@@ -191,40 +199,58 @@ pub fn run(config: Config, db: Db) -> Result<()> {
         }
     });
 
-    let shared_config: SharedConfig =
-        std::sync::Arc::new(std::sync::RwLock::new(config.clone()));
+    let (config_tx, config_rx) = tokio::sync::watch::channel(config.clone());
+    let rates_version = crate::workers::new_rates_version();
 
     // Channel for sending history log entries to the background runtime
     let (history_tx, mut history_rx) =
-        tokio::sync::mpsc::unbounded_channel::<HistoryLogEntry>();
+        tokio::sync::mpsc::channel::<HistoryLogEntry>(64);
+
+    let retention_days_startup = config.history_retention.to_days();
 
     // Spawn tokio runtime for background workers
     std::thread::spawn({
         let db_fiat = db.clone();
-        let config_fiat = shared_config.clone();
         let db_crypto = db.clone();
-        let config_crypto = shared_config.clone();
+        let config_fiat = config_rx.clone();
+        let config_crypto = config_rx;
+        let rates_fiat = rates_version.clone();
+        let rates_crypto = rates_version.clone();
 
         move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             rt.block_on(async {
-                tokio::spawn(crate::workers::start_fiat_worker(db_fiat, config_fiat));
+                if let Err(err) =
+                    crate::history::prune_history_if_needed(retention_days_startup).await
+                {
+                    warn!(error = %err, "startup history prune failed");
+                }
+
+                tokio::spawn(crate::workers::start_fiat_worker(
+                    db_fiat,
+                    config_fiat,
+                    rates_fiat,
+                ));
                 tokio::spawn(crate::workers::start_crypto_worker(
                     db_crypto,
                     config_crypto,
+                    rates_crypto,
                 ));
 
                 // History log receiver — processes entries from the UI thread
                 tokio::spawn(async move {
                     while let Some(entry) = history_rx.recv().await {
-                        let _ = crate::history::log_conversion(
+                        if let Err(err) = crate::history::log_conversion(
                             entry.input_value,
                             &entry.input_unit,
                             entry.output_value,
                             &entry.output_unit,
                             entry.retention_days,
                         )
-                        .await;
+                        .await
+                        {
+                            error!(error = %err, "failed to append history entry");
+                        }
                     }
                 });
 
@@ -274,7 +300,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
             Ok(Box::new(AppState {
                 config,
-                shared_config,
+                config_tx,
+                rates_version: rates_version.clone(),
+                last_seen_rates_version: 0,
                 db,
                 converter,
                 clipboard,
@@ -330,6 +358,12 @@ impl AppState {
     }
 
     fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let rates_v = self.rates_version.load(Ordering::Relaxed);
+        if rates_v != self.last_seen_rates_version {
+            self.converter.invalidate_units_cache();
+            self.last_seen_rates_version = rates_v;
+        }
+
         while let Ok(msg) = self.event_rx.try_recv() {
             match msg {
                 EventMsg::Exit => {
@@ -438,9 +472,6 @@ impl AppState {
         content_frame.show(ui, |ui| {
             self.render_main_window(ui, ctx);
         });
-
-
-        ctx.request_repaint();
     }
 
     fn log_conversion_if_enabled(&self) {
@@ -448,13 +479,15 @@ impl AppState {
             && let Some(result) = &self.current_result
             && let Some(first_output) = result.outputs.first()
         {
-            let _ = self.history_tx.send(HistoryLogEntry {
+            if let Err(err) = self.history_tx.try_send(HistoryLogEntry {
                 input_value: result.input_value,
                 input_unit: result.input_unit.clone(),
                 output_value: first_output.value,
                 output_unit: first_output.unit.clone(),
                 retention_days: self.config.history_retention.to_days(),
-            });
+            }) {
+                warn!(error = %err, "history log channel full or closed; dropping entry");
+            }
         }
     }
 
@@ -667,17 +700,23 @@ impl AppState {
             if let Some(recorded) = self.recorded_hotkey.take() {
                 self.config.hotkey = recorded;
             }
-            let _ = self.config.save();
-            // Propagate changes to background workers
-            if let Ok(mut shared) = self.shared_config.write() {
-                *shared = self.config.clone();
+            if let Err(err) = self.config.save() {
+                error!(error = %err, "failed to save config");
+            }
+            // Propagate changes to background workers (wakes sleeping interval waits).
+            if self.config_tx.send(self.config.clone()).is_err() {
+                warn!("config watch has no receivers");
             }
             if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
                 && hk != self.hotkey_id
             {
-                let _ = self.hotkey_manager.unregister(self.hotkey_id);
+                if let Err(err) = self.hotkey_manager.unregister(self.hotkey_id) {
+                    warn!(error = %err, "failed to unregister previous hotkey");
+                }
                 if self.hotkey_manager.register(hk).is_ok() {
                     self.hotkey_id = hk;
+                } else {
+                    warn!("failed to register new hotkey");
                 }
             }
         }
@@ -821,23 +860,26 @@ impl AppState {
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && !self.search_query_lower.is_empty()
                 {
-                    let all_units = self.converter.get_all_units().unwrap_or_default();
-                    let exact = all_units.iter().find(|u| {
-                        u.symbol.to_lowercase() == self.search_query_lower
-                            || u.aliases
-                                .iter()
-                                .any(|a| a.to_lowercase() == self.search_query_lower)
-                    });
-                    let partial = all_units.iter().find(|u| {
-                        u.symbol.to_lowercase().contains(&self.search_query_lower)
-                            || u.aliases
-                                .iter()
-                                .any(|a| a.to_lowercase().contains(&self.search_query_lower))
+                    // Borrow the cached unit list to find a match without cloning
+                    // the whole table; only the matched symbol is cloned.
+                    let matched_symbol = self.converter.all_units().ok().and_then(|all_units| {
+                        let exact = all_units.iter().find(|u| {
+                            u.symbol.to_lowercase() == self.search_query_lower
+                                || u.aliases
+                                    .iter()
+                                    .any(|a| a.to_lowercase() == self.search_query_lower)
+                        });
+                        let partial = all_units.iter().find(|u| {
+                            u.symbol.to_lowercase().contains(&self.search_query_lower)
+                                || u.aliases.iter().any(|a| {
+                                    a.to_lowercase().contains(&self.search_query_lower)
+                                })
+                        });
+                        exact.or(partial).map(|u| u.symbol.clone())
                     });
 
-                    if let Some(unit) = exact.or(partial)
-                        && let Ok(result) =
-                            self.converter.convert(self.captured_value, &unit.symbol)
+                    if let Some(symbol) = matched_symbol
+                        && let Ok(result) = self.converter.convert(self.captured_value, &symbol)
                     {
                         self.current_result = Some(result);
                         self.current_mode = WindowMode::Results;
@@ -852,16 +894,24 @@ impl AppState {
             ui.add_space(5.0);
 
             if self.current_mode == WindowMode::SourceUnitSelection {
-                let all_units = self.converter.get_all_units().unwrap_or_default();
-                let mut matching_units: Vec<_> = all_units
-                    .into_iter()
-                    .filter(|u| {
-                        u.symbol.to_lowercase().contains(&self.search_query_lower)
-                            || u.aliases
-                                .iter()
-                                .any(|a| a.to_lowercase().contains(&self.search_query_lower))
+                // Filter over the borrowed cache first, only cloning the
+                // (typically small) subset of units that actually match.
+                let mut matching_units: Vec<UnitInfo> = self
+                    .converter
+                    .all_units()
+                    .map(|all_units| {
+                        all_units
+                            .iter()
+                            .filter(|u| {
+                                u.symbol.to_lowercase().contains(&self.search_query_lower)
+                                    || u.aliases.iter().any(|a| {
+                                        a.to_lowercase().contains(&self.search_query_lower)
+                                    })
+                            })
+                            .cloned()
+                            .collect()
                     })
-                    .collect();
+                    .unwrap_or_default();
                 Self::sort_units_favorites_first(&mut matching_units, &self.config.favorites);
                 matching_units.truncate(self.config.list_size);
 
@@ -1033,7 +1083,9 @@ impl AppState {
         }
 
         if let Some((msg, time)) = &self.copied_notification {
-            if Instant::now().duration_since(*time) > Duration::from_secs(2) {
+            let elapsed = Instant::now().duration_since(*time);
+            const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(2);
+            if elapsed > NOTIFICATION_LIFETIME {
                 self.copied_notification = None;
             } else {
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -1047,7 +1099,9 @@ impl AppState {
                             .strong(),
                     );
                 });
-                ctx.request_repaint();
+                // Wake up once the notification is due to expire, instead of
+                // repainting continuously while it is visible.
+                ctx.request_repaint_after(NOTIFICATION_LIFETIME - elapsed);
             }
         }
     }
@@ -1066,32 +1120,45 @@ impl AppState {
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let max_list_height = row_height * 5.5;
 
-        egui::ScrollArea::vertical()
+        let history_action = egui::ScrollArea::vertical()
             .id_salt("recent_conversions_list")
             .max_height(max_list_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.set_width(ui.max_rect().width());
-                for item in self.recent_history.clone() {
+                let mut clicked_idx: Option<usize> = None;
+                let mut copy_idx: Option<usize> = None;
+                for (idx, item) in self.recent_history.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        let row = self.history_row(ui, &item);
+                        let row = self.history_row(ui, item);
                         if row.clicked() {
-                            self.reopen_history_item(&item);
-                            ctx.request_repaint();
+                            clicked_idx = Some(idx);
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Copy").clicked() {
-                                let text = Self::history_output_text(&item);
-                                if self.clipboard.set_text(text).is_ok() {
-                                    self.copied_notification =
-                                        Some(("Copied!".to_string(), Instant::now()));
-                                }
+                                copy_idx = Some(idx);
                             }
                         });
                     });
                 }
+                (clicked_idx, copy_idx)
             });
+
+        if let Some(idx) = history_action.inner.0
+            && let Some(item) = self.recent_history.get(idx).cloned()
+        {
+            self.reopen_history_item(&item);
+            ctx.request_repaint();
+        }
+        if let Some(idx) = history_action.inner.1
+            && let Some(item) = self.recent_history.get(idx)
+        {
+            let text = Self::history_output_text(item);
+            if self.clipboard.set_text(text).is_ok() {
+                self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
+            }
+        }
 
         ui.add_space(6.0);
     }
