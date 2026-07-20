@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 /// Base URL for the `FawazAhmed` fiat currency API (EUR base).
 const FIAT_API_URL: &str =
@@ -8,6 +10,30 @@ const FIAT_API_URL: &str =
 
 /// Base URL for the Binance crypto price API.
 const BINANCE_API_URL: &str = "https://api.binance.com/api/v3/ticker/price";
+
+/// Quote currency suffix used to identify the crypto pairs we care about.
+const USDT_SUFFIX: &str = "USDT";
+
+/// Connection timeout applied to every request made with [`HTTP_CLIENT`].
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Overall request timeout applied to every request made with [`HTTP_CLIENT`].
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Shared `reqwest` client reused across all API calls.
+///
+/// Building a fresh client per-request (as `reqwest::get` does) discards
+/// connection pooling and, more importantly, has no timeouts configured,
+/// which can leave requests hanging indefinitely on a stalled connection.
+/// Falls back to the default client (no explicit timeouts) if construction
+/// somehow fails, so callers always get a usable client.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+});
 
 /// Internal struct for parsing the `FawazAhmed` fiat API response.
 #[derive(Debug, Deserialize)]
@@ -30,7 +56,9 @@ pub(crate) struct BinanceTicker {
 /// # Errors
 /// Returns an error if the network request fails or the response cannot be parsed.
 pub async fn fetch_fiat_rates() -> Result<HashMap<String, f64>> {
-    let response: FawazAhmedResponse = reqwest::get(FIAT_API_URL)
+    let response: FawazAhmedResponse = HTTP_CLIENT
+        .get(FIAT_API_URL)
+        .send()
         .await
         .context("Failed to connect to fiat currency API")?
         .json()
@@ -50,19 +78,35 @@ pub async fn fetch_fiat_rates() -> Result<HashMap<String, f64>> {
     Ok(rates)
 }
 
-/// Fetches all crypto price tickers from the Binance API.
+/// Fetches crypto price tickers from the Binance API, narrowed to `USDT`-quoted pairs.
+///
+/// The public Binance ticker/price endpoint returns every listed symbol
+/// (spot, leveraged tokens, etc.), most of which we never use. Filtering
+/// here avoids deserializing and shipping the full, much larger payload
+/// through the rest of the pipeline.
 ///
 /// # Errors
 /// Returns an error if the network request fails or the response cannot be parsed.
 pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
-    let tickers: Vec<BinanceTicker> = reqwest::get(BINANCE_API_URL)
+    let tickers: Vec<BinanceTicker> = HTTP_CLIENT
+        .get(BINANCE_API_URL)
+        .send()
         .await
         .context("Failed to connect to Binance API")?
         .json()
         .await
         .context("Failed to parse Binance API response")?;
 
-    Ok(tickers)
+    Ok(filter_usdt_tickers(tickers))
+}
+
+/// Retains only tickers whose symbol ends with the `USDT` quote currency
+/// (e.g. `BTCUSDT`), dropping every other quote/leveraged pair.
+fn filter_usdt_tickers(tickers: Vec<BinanceTicker>) -> Vec<BinanceTicker> {
+    tickers
+        .into_iter()
+        .filter(|ticker| ticker.symbol.ends_with(USDT_SUFFIX))
+        .collect()
 }
 
 #[cfg(test)]
@@ -90,5 +134,42 @@ mod tests {
         assert_eq!(tickers.len(), 2);
         assert_eq!(tickers[0].symbol, "BTCUSDT");
         assert_eq!(tickers[0].price, "66341.21000000");
+    }
+
+    fn ticker(symbol: &str) -> BinanceTicker {
+        BinanceTicker {
+            symbol: symbol.to_string(),
+            price: "1.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_filter_usdt_tickers_keeps_only_usdt_pairs() {
+        let tickers = vec![
+            ticker("BTCUSDT"),
+            ticker("ETHBTC"),
+            ticker("ETHUSDT"),
+            ticker("BUSDUSDT"),
+            ticker("EURUSDT"),
+        ];
+
+        let filtered = filter_usdt_tickers(tickers);
+        let symbols: Vec<&str> = filtered.iter().map(|t| t.symbol.as_str()).collect();
+
+        assert_eq!(symbols, vec!["BTCUSDT", "ETHUSDT", "BUSDUSDT", "EURUSDT"]);
+    }
+
+    #[test]
+    fn test_filter_usdt_tickers_excludes_symbols_without_usdt_suffix() {
+        let tickers = vec![ticker("USDTBTC"), ticker("ETHBUSD"), ticker("BNBBTC")];
+
+        let filtered = filter_usdt_tickers(tickers);
+
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_usdt_tickers_empty_input() {
+        assert!(filter_usdt_tickers(Vec::new()).is_empty());
     }
 }

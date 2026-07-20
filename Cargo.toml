@@ -27,6 +27,8 @@ single-instance = "0.3.3"
 eframe = "0.34.1"
 egui = "0.34.1"
 egui_extras = { version = "0.34.1", features = ["svg", "image"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
