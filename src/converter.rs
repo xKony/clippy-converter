@@ -62,6 +62,9 @@ impl Converter {
     /// Replaces the configuration (e.g. after a favorites change) without
     /// discarding the cached unit list.
     pub fn set_config(&mut self, config: Config) {
+        if self.config.unit_packs != config.unit_packs {
+            self.units_cache = None;
+        }
         self.config = config;
     }
 
@@ -83,7 +86,14 @@ impl Converter {
             let unit_map = self.db.get_all_units_with_aliases()?;
             let mut result: Vec<SearchableUnit> = unit_map
                 .into_iter()
-                .map(|(symbol, aliases)| SearchableUnit::new(UnitInfo { symbol, aliases }))
+                .filter(|(_, (_, category))| self.config.unit_packs.allows(*category))
+                .map(|(symbol, (aliases, category))| {
+                    SearchableUnit::new(UnitInfo {
+                        symbol,
+                        aliases,
+                        category,
+                    })
+                })
                 .collect();
             result.sort_by(|a, b| a.info.symbol.cmp(&b.info.symbol));
             self.units_cache = Some(result);
@@ -435,5 +445,62 @@ mod tests {
         assert_eq!(res.outputs[0].unit, "PLN");
         assert!((res.outputs[0].value - 40.0).abs() < f64::EPSILON);
         assert!(res.outputs.iter().any(|o| o.unit == "USD"));
+    }
+
+    #[test]
+    fn all_units_should_honor_disabled_packs() {
+        let mut config = Config::default();
+        config.unit_packs.volume = false;
+        config.unit_packs.scientific = false;
+        let db = create_test_db();
+        let mut converter = Converter::new(config, db);
+
+        let symbols: Vec<&str> = converter
+            .all_units()
+            .unwrap()
+            .iter()
+            .map(|u| u.info.symbol.as_str())
+            .collect();
+        assert!(!symbols.contains(&"L"));
+        assert!(!symbols.contains(&"Pa"));
+        assert!(symbols.contains(&"m"));
+    }
+
+    #[test]
+    fn convert_should_still_work_for_disabled_pack_on_capture() {
+        let mut config = Config::default();
+        config.unit_packs.volume = false;
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter.convert(1.0, "L").unwrap();
+        assert!(res.outputs.iter().any(|o| o.unit == "gal"));
+    }
+
+    #[test]
+    fn convert_should_handle_volume_and_speed() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter.convert(1.0, "L").unwrap();
+        let gal = res.outputs.iter().find(|o| o.unit == "gal").unwrap();
+        assert!((gal.value - 1.0 / 3.785_411_784).abs() < 1e-9);
+
+        let res = converter.convert(36.0, "km/h").unwrap();
+        let mps = res.outputs.iter().find(|o| o.unit == "m/s").unwrap();
+        assert!((mps.value - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn convert_should_handle_scientific_pressure() {
+        let mut config = Config::default();
+        config.unit_packs.scientific = true;
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter.convert(1.0, "bar").unwrap();
+        let pa = res.outputs.iter().find(|o| o.unit == "Pa").unwrap();
+        assert!((pa.value - 100_000.0).abs() < 1e-6);
     }
 }

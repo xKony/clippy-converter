@@ -219,7 +219,7 @@ impl Db {
     /// Returns an error if the read transaction or iteration fails.
     pub fn get_all_units_with_aliases(
         &self,
-    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    ) -> Result<std::collections::HashMap<String, (Vec<String>, u8)>> {
         let read_txn = self
             .inner
             .begin_read()
@@ -233,28 +233,25 @@ impl Db {
 
         let mut unit_map = std::collections::HashMap::new();
 
-        // 1. Collect all canonical symbols, skipping entries that failed to deserialize.
         for result in units_table.iter().context("Failed to iterate units")? {
             let (key, value) = result.context("Failed to read unit row")?;
-            if value.value().is_corrupt() {
+            let entry = value.value();
+            if entry.is_corrupt() {
                 continue;
             }
-            unit_map.insert(key.value().to_string(), Vec::new());
+            unit_map.insert(key.value().to_string(), (Vec::new(), entry.category));
         }
 
-        // 2. Collect all aliases and group them by canonical symbol
         for result in alias_table.iter().context("Failed to iterate aliases")? {
             let (alias, canonical) = result.context("Failed to read alias row")?;
             let canonical_str = canonical.value();
             let alias_str = alias.value();
 
-            if let Some(aliases) = unit_map.get_mut(canonical_str) {
-                // Only add if it's actually an alias (not just the lowercase version of the symbol itself)
-                if alias_str.to_lowercase() != canonical_str.to_lowercase()
-                    && !aliases.contains(&alias_str.to_string())
-                {
-                    aliases.push(alias_str.to_string());
-                }
+            if let Some((aliases, _)) = unit_map.get_mut(canonical_str)
+                && alias_str.to_lowercase() != canonical_str.to_lowercase()
+                && !aliases.contains(&alias_str.to_string())
+            {
+                aliases.push(alias_str.to_string());
             }
         }
 
@@ -411,7 +408,7 @@ struct StaticUnit {
     aliases: &'static [&'static str],
 }
 
-/// Static length/weight/temperature/time units seeded on first launch.
+/// Static length/weight/temperature/time/volume/area/speed/data units seeded on first launch.
 /// Temperature: Base = (Input + Offset) * Factor, Target = (Base / Factor) - Offset.
 /// Celsius is the base (factor=1, offset=0); F uses (F-32)*5/9; K uses K-273.15.
 const STATIC_UNITS: &[StaticUnit] = &[
@@ -554,6 +551,293 @@ const STATIC_UNITS: &[StaticUnit] = &[
         factor: 3600.0,
         offset: 0.0,
         aliases: &["hour", "hours"],
+    },
+    StaticUnit {
+        symbol: "L",
+        category: UnitCategory::Volume,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["l", "liter", "liters", "litre", "litres"],
+    },
+    StaticUnit {
+        symbol: "mL",
+        category: UnitCategory::Volume,
+        factor: 0.001,
+        offset: 0.0,
+        aliases: &["ml", "milliliter", "milliliters", "millilitre", "millilitres"],
+    },
+    StaticUnit {
+        symbol: "gal",
+        category: UnitCategory::Volume,
+        factor: 3.785_411_784,
+        offset: 0.0,
+        aliases: &["gallon", "gallons"],
+    },
+    StaticUnit {
+        symbol: "fl oz",
+        category: UnitCategory::Volume,
+        factor: 0.029_573_529_562_5,
+        offset: 0.0,
+        aliases: &["floz", "fluid ounce", "fluid ounces"],
+    },
+    StaticUnit {
+        symbol: "m2",
+        category: UnitCategory::Area,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["m²", "sqm", "square meter", "square meters"],
+    },
+    StaticUnit {
+        symbol: "km2",
+        category: UnitCategory::Area,
+        factor: 1_000_000.0,
+        offset: 0.0,
+        aliases: &["km²", "square kilometer", "square kilometers"],
+    },
+    StaticUnit {
+        symbol: "ha",
+        category: UnitCategory::Area,
+        factor: 10_000.0,
+        offset: 0.0,
+        aliases: &["hectare", "hectares"],
+    },
+    StaticUnit {
+        symbol: "acre",
+        category: UnitCategory::Area,
+        factor: 4_046.856_422_4,
+        offset: 0.0,
+        aliases: &["acres", "ac"],
+    },
+    StaticUnit {
+        symbol: "ft2",
+        category: UnitCategory::Area,
+        factor: 0.092_903_04,
+        offset: 0.0,
+        aliases: &["ft²", "sqft", "square foot", "square feet"],
+    },
+    StaticUnit {
+        symbol: "m/s",
+        category: UnitCategory::Speed,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["mps", "meter per second", "meters per second"],
+    },
+    StaticUnit {
+        symbol: "km/h",
+        category: UnitCategory::Speed,
+        factor: 1.0 / 3.6,
+        offset: 0.0,
+        aliases: &["kph", "kmh", "kilometer per hour", "kilometers per hour"],
+    },
+    StaticUnit {
+        symbol: "mph",
+        category: UnitCategory::Speed,
+        factor: 0.447_04,
+        offset: 0.0,
+        aliases: &["mi/h", "mile per hour", "miles per hour"],
+    },
+    StaticUnit {
+        symbol: "kn",
+        category: UnitCategory::Speed,
+        factor: 0.514_444,
+        offset: 0.0,
+        aliases: &["kt", "knot", "knots"],
+    },
+    StaticUnit {
+        symbol: "B",
+        category: UnitCategory::Data,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["byte", "bytes"],
+    },
+    StaticUnit {
+        symbol: "KB",
+        category: UnitCategory::Data,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilobyte", "kilobytes"],
+    },
+    StaticUnit {
+        symbol: "MB",
+        category: UnitCategory::Data,
+        factor: 1_000_000.0,
+        offset: 0.0,
+        aliases: &["megabyte", "megabytes"],
+    },
+    StaticUnit {
+        symbol: "GB",
+        category: UnitCategory::Data,
+        factor: 1_000_000_000.0,
+        offset: 0.0,
+        aliases: &["gigabyte", "gigabytes"],
+    },
+    StaticUnit {
+        symbol: "KiB",
+        category: UnitCategory::Data,
+        factor: 1024.0,
+        offset: 0.0,
+        aliases: &["kibibyte", "kibibytes"],
+    },
+    StaticUnit {
+        symbol: "MiB",
+        category: UnitCategory::Data,
+        factor: 1_048_576.0,
+        offset: 0.0,
+        aliases: &["mebibyte", "mebibytes"],
+    },
+    StaticUnit {
+        symbol: "GiB",
+        category: UnitCategory::Data,
+        factor: 1_073_741_824.0,
+        offset: 0.0,
+        aliases: &["gibibyte", "gibibytes"],
+    },
+    StaticUnit {
+        symbol: "Pa",
+        category: UnitCategory::Pressure,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pascal", "pascals"],
+    },
+    StaticUnit {
+        symbol: "kPa",
+        category: UnitCategory::Pressure,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilopascal", "kilopascals"],
+    },
+    StaticUnit {
+        symbol: "bar",
+        category: UnitCategory::Pressure,
+        factor: 100_000.0,
+        offset: 0.0,
+        aliases: &["bars"],
+    },
+    StaticUnit {
+        symbol: "atm",
+        category: UnitCategory::Pressure,
+        factor: 101_325.0,
+        offset: 0.0,
+        aliases: &["atmosphere", "atmospheres"],
+    },
+    StaticUnit {
+        symbol: "psi",
+        category: UnitCategory::Pressure,
+        factor: 6_894.757_293_168,
+        offset: 0.0,
+        aliases: &["psia"],
+    },
+    StaticUnit {
+        symbol: "J",
+        category: UnitCategory::Energy,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["joule", "joules"],
+    },
+    StaticUnit {
+        symbol: "kJ",
+        category: UnitCategory::Energy,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilojoule", "kilojoules"],
+    },
+    StaticUnit {
+        symbol: "kcal",
+        category: UnitCategory::Energy,
+        factor: 4184.0,
+        offset: 0.0,
+        aliases: &["kilocalorie", "kilocalories", "Cal"],
+    },
+    StaticUnit {
+        symbol: "Wh",
+        category: UnitCategory::Energy,
+        factor: 3600.0,
+        offset: 0.0,
+        aliases: &["watt-hour", "watt hours"],
+    },
+    StaticUnit {
+        symbol: "kWh",
+        category: UnitCategory::Energy,
+        factor: 3_600_000.0,
+        offset: 0.0,
+        aliases: &["kilowatt-hour", "kilowatt hours"],
+    },
+    StaticUnit {
+        symbol: "W",
+        category: UnitCategory::Power,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["watt", "watts"],
+    },
+    StaticUnit {
+        symbol: "kW",
+        category: UnitCategory::Power,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilowatt", "kilowatts"],
+    },
+    StaticUnit {
+        symbol: "hp",
+        category: UnitCategory::Power,
+        factor: 745.7,
+        offset: 0.0,
+        aliases: &["horsepower"],
+    },
+    StaticUnit {
+        symbol: "N",
+        category: UnitCategory::Force,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["newton", "newtons"],
+    },
+    StaticUnit {
+        symbol: "lbf",
+        category: UnitCategory::Force,
+        factor: 4.448_221_615_260_5,
+        offset: 0.0,
+        aliases: &["pound-force"],
+    },
+    StaticUnit {
+        symbol: "rad",
+        category: UnitCategory::Angle,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["radian", "radians"],
+    },
+    StaticUnit {
+        symbol: "deg",
+        category: UnitCategory::Angle,
+        factor: std::f64::consts::PI / 180.0,
+        offset: 0.0,
+        aliases: &["degree", "degrees", "°"],
+    },
+    StaticUnit {
+        symbol: "Hz",
+        category: UnitCategory::Frequency,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["hertz"],
+    },
+    StaticUnit {
+        symbol: "kHz",
+        category: UnitCategory::Frequency,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilohertz"],
+    },
+    StaticUnit {
+        symbol: "MHz",
+        category: UnitCategory::Frequency,
+        factor: 1_000_000.0,
+        offset: 0.0,
+        aliases: &["megahertz"],
+    },
+    StaticUnit {
+        symbol: "GHz",
+        category: UnitCategory::Frequency,
+        factor: 1_000_000_000.0,
+        offset: 0.0,
+        aliases: &["gigahertz"],
     },
 ];
 

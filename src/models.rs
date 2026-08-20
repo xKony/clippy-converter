@@ -29,6 +29,9 @@ pub struct Config {
     /// How to group thousands in displayed numbers (not used when copying).
     #[serde(default)]
     pub thousand_separator: ThousandSeparator,
+    /// Optional extra unit groups. Core length/weight/temperature/time/currency stay on.
+    #[serde(default)]
+    pub unit_packs: UnitPacks,
 }
 
 /// Visual grouping of digits in displayed numbers.
@@ -90,6 +93,75 @@ const fn default_read_selection_on_hotkey() -> bool {
     true
 }
 
+const fn default_true() -> bool {
+    true
+}
+
+/// Optional unit groups the user can toggle in Settings.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each pack is an independent settings checkbox"
+)]
+pub struct UnitPacks {
+    /// Litres, gallons, fluid ounces.
+    #[serde(default = "default_true")]
+    pub volume: bool,
+    /// Square metres, acres, hectares.
+    #[serde(default = "default_true")]
+    pub area: bool,
+    /// km/h, mph, knots.
+    #[serde(default = "default_true")]
+    pub speed: bool,
+    /// Bytes, KB/KiB, and larger.
+    #[serde(default = "default_true")]
+    pub data: bool,
+    /// Pressure, energy, power, force, angle, frequency.
+    #[serde(default)]
+    pub scientific: bool,
+}
+
+impl Default for UnitPacks {
+    fn default() -> Self {
+        Self {
+            volume: true,
+            area: true,
+            speed: true,
+            data: true,
+            scientific: false,
+        }
+    }
+}
+
+impl UnitPacks {
+    /// Core categories are always listed; extra packs follow these flags.
+    #[must_use]
+    pub const fn allows(self, category: u8) -> bool {
+        if category == UnitCategory::Volume as u8 {
+            return self.volume;
+        }
+        if category == UnitCategory::Area as u8 {
+            return self.area;
+        }
+        if category == UnitCategory::Speed as u8 {
+            return self.speed;
+        }
+        if category == UnitCategory::Data as u8 {
+            return self.data;
+        }
+        if category == UnitCategory::Pressure as u8
+            || category == UnitCategory::Energy as u8
+            || category == UnitCategory::Power as u8
+            || category == UnitCategory::Force as u8
+            || category == UnitCategory::Angle as u8
+            || category == UnitCategory::Frequency as u8
+        {
+            return self.scientific;
+        }
+        true
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -107,6 +179,7 @@ impl Default for Config {
             fiat_update_interval_mins: 1440, // Daily
             crypto_update_interval_mins: 60, // Every hour
             thousand_separator: ThousandSeparator::None,
+            unit_packs: UnitPacks::default(),
         }
     }
 }
@@ -184,6 +257,26 @@ pub enum UnitCategory {
     Temperature = 3,
     /// Time measurements (e.g., s, ms).
     Time = 4,
+    /// Capacity (e.g., L, gal).
+    Volume = 5,
+    /// Surface (e.g., m2, acre).
+    Area = 6,
+    /// Velocity (e.g., km/h, mph).
+    Speed = 7,
+    /// Digital size (e.g., B, MiB).
+    Data = 8,
+    /// Pressure (e.g., Pa, psi).
+    Pressure = 9,
+    /// Energy (e.g., J, kWh).
+    Energy = 10,
+    /// Power (e.g., W, hp).
+    Power = 11,
+    /// Force (e.g., N, lbf).
+    Force = 12,
+    /// Angle (e.g., deg, rad).
+    Angle = 13,
+    /// Frequency (e.g., Hz, kHz).
+    Frequency = 14,
 }
 
 /// A unified rate/unit entry stored in the database.
@@ -208,6 +301,8 @@ pub struct UnitInfo {
     pub symbol: String,
     /// List of aliases (e.g., `["meter", "meters"]`).
     pub aliases: Vec<String>,
+    /// Unit category (matches `UnitCategory`).
+    pub category: u8,
 }
 
 /// Helper to save a serializable value as pretty JSON to a file.
@@ -271,5 +366,21 @@ mod tests {
     #[test]
     fn test_config_default_reads_selection() {
         assert!(Config::default().read_selection_on_hotkey);
+    }
+
+    #[test]
+    fn test_config_missing_unit_packs_defaults_everyday_on() {
+        let json = r#"{
+            "favorites": [],
+            "hotkey": "Shift+Alt+C",
+            "list_size": 10,
+            "history_enabled": false,
+            "history_retention": "ThirtyDays",
+            "fiat_update_interval_mins": 1440,
+            "crypto_update_interval_mins": 60
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.unit_packs.volume);
+        assert!(!config.unit_packs.scientific);
     }
 }

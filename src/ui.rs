@@ -515,6 +515,46 @@ impl AppState {
         });
     }
 
+    fn persist_config(&mut self) {
+        self.converter.set_config(self.config.clone());
+        self.unit_filter_query = None;
+        if let Err(err) = self.config.save() {
+            error!(error = %err, "failed to save config");
+        }
+        if self.config_tx.send(self.config.clone()).is_err() {
+            warn!("config watch has no receivers");
+        }
+    }
+
+    fn apply_recorded_hotkey(&mut self) {
+        let Some(recorded) = self.recorded_hotkey.take() else {
+            return;
+        };
+        self.config.hotkey = recorded;
+        if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
+            && hk != self.hotkey_id
+        {
+            if let Err(err) = self.hotkey_manager.unregister(self.hotkey_id) {
+                warn!(error = %err, "failed to unregister previous hotkey");
+            }
+            if self.hotkey_manager.register(hk).is_ok() {
+                self.hotkey_id = hk;
+            } else {
+                warn!("failed to register new hotkey");
+            }
+        }
+        self.persist_config();
+    }
+
+    fn apply_interval_fields(&mut self) {
+        if let Ok(mins) = self.config_fiat_interval_str.parse::<u64>() {
+            self.config.fiat_update_interval_mins = mins.max(1);
+        }
+        if let Ok(mins) = self.config_crypto_interval_str.parse::<u64>() {
+            self.config.crypto_update_interval_mins = mins.max(1);
+        }
+    }
+
     fn log_conversion_if_enabled(&self) {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
@@ -648,7 +688,7 @@ impl AppState {
                         } else if let Some(hk) = format_hotkey(*key, *modifiers) {
                             self.recorded_hotkey = Some(hk);
                             self.is_recording_hotkey = false;
-                            let _ = self.hotkey_manager.register(self.hotkey_id);
+                            self.apply_recorded_hotkey();
                         }
                     }
                 }
@@ -676,10 +716,15 @@ impl AppState {
 
         ui.separator();
 
-        ui.checkbox(
-            &mut self.config.read_selection_on_hotkey,
-            "Read selected text on hotkey",
-        );
+        if ui
+            .checkbox(
+                &mut self.config.read_selection_on_hotkey,
+                "Read selected text on hotkey",
+            )
+            .changed()
+        {
+            self.persist_config();
+        }
         ui.label(
             egui::RichText::new(
                 "On by default. Unchecked: hotkey opens an empty popup.",
@@ -693,49 +738,60 @@ impl AppState {
 
         ui.label("Thousand separators (display only)");
         ui.horizontal(|ui| {
-            ui.selectable_value(
+            let off = ui.selectable_value(
                 &mut self.config.thousand_separator,
                 ThousandSeparator::None,
                 "Off",
             );
-            ui.selectable_value(
+            let spaces = ui.selectable_value(
                 &mut self.config.thousand_separator,
                 ThousandSeparator::Space,
                 "Spaces",
             );
-            ui.selectable_value(
+            let commas = ui.selectable_value(
                 &mut self.config.thousand_separator,
                 ThousandSeparator::Comma,
                 "Commas",
             );
+            if off.changed() || spaces.changed() || commas.changed() {
+                self.persist_config();
+            }
         });
 
         ui.separator();
 
-        ui.checkbox(&mut self.config.history_enabled, "Enable History Logging");
+        if ui
+            .checkbox(&mut self.config.history_enabled, "Enable History Logging")
+            .changed()
+        {
+            self.persist_config();
+        }
         if self.config.history_enabled {
             ui.horizontal(|ui| {
                 ui.label("Retention:");
-                ui.selectable_value(
+                let d7 = ui.selectable_value(
                     &mut self.config.history_retention,
                     HistoryRetention::SevenDays,
                     "7d",
                 );
-                ui.selectable_value(
+                let d30 = ui.selectable_value(
                     &mut self.config.history_retention,
                     HistoryRetention::ThirtyDays,
                     "30d",
                 );
-                ui.selectable_value(
+                let y1 = ui.selectable_value(
                     &mut self.config.history_retention,
                     HistoryRetention::OneYear,
                     "1y",
                 );
-                ui.selectable_value(
+                let never = ui.selectable_value(
                     &mut self.config.history_retention,
                     HistoryRetention::Never,
                     "Never",
                 );
+                if d7.changed() || d30.changed() || y1.changed() || never.changed() {
+                    self.persist_config();
+                }
             });
         }
 
@@ -747,51 +803,66 @@ impl AppState {
         }
 
         ui.separator();
+
+        ui.label("Unit packs");
+        ui.label(
+            egui::RichText::new(
+                "Length, weight, temperature, time, and currency are always on.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+        let volume = ui.checkbox(
+            &mut self.config.unit_packs.volume,
+            "Volume (L, gal, fl oz)",
+        );
+        let area = ui.checkbox(&mut self.config.unit_packs.area, "Area (m², acre, ha)");
+        let speed = ui.checkbox(&mut self.config.unit_packs.speed, "Speed (km/h, mph, kn)");
+        let data = ui.checkbox(&mut self.config.unit_packs.data, "Data (KB, MiB, GB)");
+        let scientific = ui.checkbox(
+            &mut self.config.unit_packs.scientific,
+            "Scientific (Pa, J, W, N, deg, Hz)",
+        );
+        if volume.changed()
+            || area.changed()
+            || speed.changed()
+            || data.changed()
+            || scientific.changed()
+        {
+            self.persist_config();
+        }
+
+        ui.separator();
         ui.label("Update Intervals (minutes)");
         ui.horizontal(|ui| {
             ui.label("Fiat:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.config_fiat_interval_str)
-                    .desired_width(72.0),
+            let fiat = ui.add(
+                egui::TextEdit::singleline(&mut self.config_fiat_interval_str).desired_width(72.0),
             );
+            if fiat.lost_focus() {
+                self.apply_interval_fields();
+                self.persist_config();
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Crypto:");
-            ui.add(
+            let crypto = ui.add(
                 egui::TextEdit::singleline(&mut self.config_crypto_interval_str)
                     .desired_width(72.0),
             );
+            if crypto.lost_focus() {
+                self.apply_interval_fields();
+                self.persist_config();
+            }
         });
 
         ui.separator();
         if ui.button("Save & Apply").clicked() {
-            if let Ok(mins) = self.config_fiat_interval_str.parse::<u64>() {
-                self.config.fiat_update_interval_mins = mins.max(1);
-            }
-            if let Ok(mins) = self.config_crypto_interval_str.parse::<u64>() {
-                self.config.crypto_update_interval_mins = mins.max(1);
-            }
-            if let Some(recorded) = self.recorded_hotkey.take() {
-                self.config.hotkey = recorded;
-            }
-            if let Err(err) = self.config.save() {
-                error!(error = %err, "failed to save config");
-            }
-            // Propagate changes to background workers (wakes sleeping interval waits).
-            if self.config_tx.send(self.config.clone()).is_err() {
-                warn!("config watch has no receivers");
-            }
-            if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
-                && hk != self.hotkey_id
-            {
-                if let Err(err) = self.hotkey_manager.unregister(self.hotkey_id) {
-                    warn!(error = %err, "failed to unregister previous hotkey");
-                }
-                if self.hotkey_manager.register(hk).is_ok() {
-                    self.hotkey_id = hk;
-                } else {
-                    warn!("failed to register new hotkey");
-                }
+            self.apply_interval_fields();
+            if self.recorded_hotkey.is_some() {
+                self.apply_recorded_hotkey();
+            } else {
+                self.persist_config();
             }
         }
     }
