@@ -40,7 +40,7 @@
 - `src/api.rs`: External HTTP requests to Binance and fiat currency APIs (shared `reqwest` client with timeouts; Binance results filtered to USDT pairs, with leveraged/1000x/1M noise pairs dropped).
 - `src/clipboard.rs`: Clipboard capture via Enigo (Ctrl+C / Cmd+C) and Arboard, with marker-based wait and clipboard restore.
 - `src/converter.rs`: Core engine for calculating unit and currency conversions (cached unit list with invalidation; `convert_preferring` pins an explicit `to`/`in` target).
-- `src/db.rs`: Thread-safe wrapper for redb; batched rate writes; corrupt-entry detection; static unit seed (`STATIC_UNITS`).
+- `src/db.rs`: Thread-safe wrapper for redb; batched rate writes; corrupt-entry detection; versioned static unit seed (`STATIC_UNITS` + `meta.static_seed_version`).
 - `src/format.rs`: Display vs copy number formatting (`ThousandSeparator` grouping is display-only).
 - `src/history.rs`: Append-only conversion log with at-most-daily atomic prune.
 - `src/hotkey.rs`: Parsing human-readable hotkeys into system structures.
@@ -61,7 +61,7 @@
 - **Database:** `redb` embedded key-value store for offline persistence of exchange rates and unit conversion factors (`units_v2` + `aliases` tables).
 - **Parsing / convert:** `parse_input` returns `ParsedInput { value, unit, target }`. The popup calls `Converter::convert_preferring` so `100 USD to PLN` can pin PLN first. Metric prefixes and currency multipliers (`5B USD`) are handled in the converter, not the parser.
 - **Config defaults:** Fresh installs enable selection capture (`read_selection_on_hotkey: true`). Default hotkey is `Shift+Alt+C`. `config.json` is a non-atomic `fs::write`.
-- **Unit categories:** Currency (live rates) plus static length, weight, temperature, time, volume, area, speed, and data. Seeded in `db.rs` `STATIC_UNITS`.
+- **Unit categories:** Currency (live rates) plus static length, weight, temperature, time, volume, area, speed, and data. Seeded in `db.rs` `STATIC_UNITS`; existing databases pick up seed changes when `STATIC_SEED_VERSION` is bumped.
 - **Logging:** `tracing` / `tracing-subscriber` (default filter `info`; override with `RUST_LOG`).
 
 ## 5. Available scripts
@@ -87,7 +87,7 @@
 
 ## 9. Known constraints and gotchas
 - **Database Lock:** `redb` allows only one writer/process. The `single-instance` crate is critical to prevent database initialization failures. A second launch currently errors and exits rather than focusing the existing instance.
-- **Static unit seed:** `add_unit_static` skips symbols that already exist. New categories or factor/alias fixes in `STATIC_UNITS` never reach databases that already ran init. Existing installs need a seed/schema version (or a one-shot rewrite) to pick up volume/area/speed/data after first launch.
+- **Static unit seed:** `init_static_units` stores `static_seed_version` in the `meta` table. When `STATIC_SEED_VERSION` in `db.rs` is newer than the stored value, every `STATIC_UNITS` row is rewritten (factors, aliases, new categories). Bump that constant when the seed changes; same-version launches are a no-op.
 - **Global Hotkeys:** OS-level conflicts may arise if `Shift+Alt+C` is already registered by another application.
 - **Clipboard Race Conditions:** Programmatic copy using `enigo` relies on a unique clipboard marker, short delays, and clipboard restoration, which might be sensitive to OS-level clipboard managers.
 - **API Parsing:** Binance pairs are filtered to `*USDT` in `api.rs` (leveraged UP/DOWN/BULL/BEAR and `1000`/`1M` prefixes dropped), then mapped with `.strip_suffix("USDT")` in workers — pairs without a USDT quote are ignored.

@@ -12,6 +12,15 @@ const UNITS_TABLE: TableDefinition<&str, UnitEntry> = TableDefinition::new("unit
 /// Schema for unit aliases (e.g., "meters" -> "m").
 const ALIASES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("aliases");
 
+/// Key/value metadata (seed version, etc.).
+const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
+
+/// Bump when [`STATIC_UNITS`] gains rows, factor fixes, or new aliases so existing
+/// databases rewrite static entries. `add_unit_static` used to skip symbols that
+/// already existed, which left upgrades invisible.
+const STATIC_SEED_VERSION: u64 = 1;
+const STATIC_SEED_VERSION_KEY: &str = "static_seed_version";
+
 // Implement redb::Value for UnitEntry using bincode serialization.
 impl redb::Value for UnitEntry {
     type SelfType<'a> = Self;
@@ -103,6 +112,9 @@ impl Db {
             let _ = write_txn
                 .open_table(ALIASES_TABLE)
                 .context("Failed to create aliases table")?;
+            let _ = write_txn
+                .open_table(META_TABLE)
+                .context("Failed to create meta table")?;
         }
         write_txn
             .commit()
@@ -374,7 +386,10 @@ impl Db {
         Ok(())
     }
 
-    /// Initializes the database with static units and their aliases.
+    /// Initializes (or upgrades) static units and aliases.
+    ///
+    /// No-ops when [`STATIC_SEED_VERSION`] is already stored, so launch stays cheap.
+    /// On a missing or older version, every [`STATIC_UNITS`] row is rewritten.
     ///
     /// # Errors
     /// Returns an error if any transaction fails.
@@ -383,6 +398,19 @@ impl Db {
             .inner
             .begin_write()
             .context("Failed to begin write transaction")?;
+        let needs_seed = {
+            let meta = write_txn
+                .open_table(META_TABLE)
+                .context("Failed to open meta table")?;
+            meta.get(STATIC_SEED_VERSION_KEY)
+                .context("Failed to read static seed version")?
+                .map_or(0, |value| value.value())
+                < STATIC_SEED_VERSION
+        };
+        if !needs_seed {
+            return Ok(());
+        }
+
         {
             let mut units = write_txn
                 .open_table(UNITS_TABLE)
@@ -390,8 +418,14 @@ impl Db {
             let mut aliases = write_txn
                 .open_table(ALIASES_TABLE)
                 .context("Failed to open aliases table")?;
-
             seed_static_units(&mut units, &mut aliases)?;
+        }
+        {
+            let mut meta = write_txn
+                .open_table(META_TABLE)
+                .context("Failed to open meta table")?;
+            meta.insert(STATIC_SEED_VERSION_KEY, STATIC_SEED_VERSION)
+                .context("Failed to store static seed version")?;
         }
         write_txn
             .commit()
@@ -851,33 +885,25 @@ fn seed_static_units(
     Ok(())
 }
 
-/// Helper to add a unit and its variations to the database.
-/// Skips insertion if the unit already exists to avoid overwriting on every launch.
+/// Writes a static unit and its aliases. Called only when the seed version is
+/// behind, so overwriting existing static rows is the upgrade path.
 fn add_unit_static(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
     unit: &StaticUnit,
 ) -> Result<()> {
-    // Only insert if the unit doesn't already exist
-    let exists = units
-        .get(unit.symbol)
-        .context("Failed to check existing unit")?
-        .is_some();
-
-    if !exists {
-        units
-            .insert(
-                unit.symbol,
-                UnitEntry {
-                    factor: unit.factor,
-                    offset: unit.offset,
-                    category: unit.category as u8,
-                    timestamp: 0,
-                    source: RateSource::Static as u8,
-                },
-            )
-            .context("Failed to insert static unit")?;
-    }
+    units
+        .insert(
+            unit.symbol,
+            UnitEntry {
+                factor: unit.factor,
+                offset: unit.offset,
+                category: unit.category as u8,
+                timestamp: 0,
+                source: RateSource::Static as u8,
+            },
+        )
+        .context("Failed to insert static unit")?;
 
     for v in unit.aliases {
         aliases
@@ -1130,5 +1156,46 @@ mod tests {
         assert_eq!(f.category, UnitCategory::Temperature as u8);
         assert!((f.factor - 5.0 / 9.0).abs() < f64::EPSILON);
         assert_eq!(f.offset, -32.0);
+
+        let litre = db.get_unit("L").unwrap().unwrap();
+        assert_eq!(litre.category, UnitCategory::Volume as u8);
+    }
+
+    #[test]
+    fn init_static_units_should_rewrite_stale_static_rows_when_seed_unversioned() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.update_unit("m", 99.0, 0.0, UnitCategory::Length, RateSource::Static)
+            .unwrap();
+        assert!((db.get_unit("m").unwrap().unwrap().factor - 99.0).abs() < f64::EPSILON);
+
+        db.init_static_units().unwrap();
+
+        let metres = db.get_unit("m").unwrap().unwrap();
+        assert!((metres.factor - 1.0).abs() < f64::EPSILON);
+        assert_eq!(db.resolve_symbol("meters").unwrap(), "m");
+        assert!(db.get_unit("L").unwrap().is_some());
+    }
+
+    #[test]
+    fn init_static_units_should_skip_rewrite_when_seed_version_current() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.init_static_units().unwrap();
+        db.update_unit("m", 99.0, 0.0, UnitCategory::Length, RateSource::Static)
+            .unwrap();
+
+        db.init_static_units().unwrap();
+
+        let metres = db.get_unit("m").unwrap().unwrap();
+        assert!((metres.factor - 99.0).abs() < f64::EPSILON);
     }
 }
