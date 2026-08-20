@@ -14,7 +14,7 @@ pub struct Config {
     /// Global hotkey combination (e.g., "Shift+Alt+C").
     pub hotkey: String,
     /// When true, the hotkey copies the current selection before opening the popup.
-    #[serde(default)]
+    #[serde(default = "default_read_selection_on_hotkey")]
     pub read_selection_on_hotkey: bool,
     /// Maximum number of conversion results to show.
     pub list_size: usize,
@@ -86,6 +86,10 @@ pub(crate) fn cmp_favorite_rank(a: &str, b: &str, ranks: &HashMap<&str, usize>) 
     }
 }
 
+const fn default_read_selection_on_hotkey() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -96,7 +100,7 @@ impl Default for Config {
                 "lb".to_string(),
             ],
             hotkey: "Shift+Alt+C".to_string(),
-            read_selection_on_hotkey: false,
+            read_selection_on_hotkey: true,
             list_size: 10,
             history_enabled: false,
             history_retention: HistoryRetention::ThirtyDays,
@@ -250,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_missing_read_selection_defaults_false() {
+    fn test_config_missing_read_selection_defaults_true() {
         let json = r#"{
             "favorites": [],
             "hotkey": "Shift+Alt+C",
@@ -261,6 +265,11 @@ mod tests {
             "crypto_update_interval_mins": 60
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
-        assert!(!config.read_selection_on_hotkey);
+        assert!(config.read_selection_on_hotkey);
+    }
+
+    #[test]
+    fn test_config_default_reads_selection() {
+        assert!(Config::default().read_selection_on_hotkey);
     }
 }
