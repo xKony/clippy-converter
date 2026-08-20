@@ -105,8 +105,21 @@ pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
 fn filter_usdt_tickers(tickers: Vec<BinanceTicker>) -> Vec<BinanceTicker> {
     tickers
         .into_iter()
-        .filter(|ticker| ticker.symbol.ends_with(USDT_SUFFIX))
+        .filter(|ticker| ticker.symbol.ends_with(USDT_SUFFIX) && !is_noise_usdt_pair(&ticker.symbol))
         .collect()
+}
+
+/// Leveraged tokens and 1000x meme contracts that clutter the unit picker.
+fn is_noise_usdt_pair(symbol: &str) -> bool {
+    let Some(base) = symbol.strip_suffix(USDT_SUFFIX) else {
+        return false;
+    };
+    base.starts_with("1000")
+        || base.starts_with("1M")
+        || base.ends_with("UP")
+        || base.ends_with("DOWN")
+        || base.ends_with("BULL")
+        || base.ends_with("BEAR")
 }
 
 #[cfg(test)]
@@ -171,5 +184,21 @@ mod tests {
     #[test]
     fn test_filter_usdt_tickers_empty_input() {
         assert!(filter_usdt_tickers(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn filter_usdt_tickers_should_drop_leveraged_and_thousand_tokens() {
+        let tickers = vec![
+            ticker("BTCUSDT"),
+            ticker("1000PEPEUSDT"),
+            ticker("BTCUPUSDT"),
+            ticker("ETHDOWNUSDT"),
+            ticker("ETHBULLUSDT"),
+            ticker("1MBABYDOGEUSDT"),
+            ticker("SOLUSDT"),
+        ];
+        let filtered = filter_usdt_tickers(tickers);
+        let symbols: Vec<&str> = filtered.iter().map(|t| t.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["BTCUSDT", "SOLUSDT"]);
     }
 }
