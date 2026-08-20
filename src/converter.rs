@@ -97,6 +97,20 @@ impl Converter {
     /// # Errors
     /// Returns an error if the input unit is unknown or if the conversion fails.
     pub fn convert(&self, value: f64, from_input: &str) -> Result<ConversionResult> {
+        self.convert_preferring(value, from_input, None)
+    }
+
+    /// Like [`Self::convert`], but pins `prefer` at the front of the output list
+    /// when that symbol exists in the same category.
+    ///
+    /// # Errors
+    /// Returns an error if the input unit is unknown or if the conversion fails.
+    pub fn convert_preferring(
+        &self,
+        value: f64,
+        from_input: &str,
+        prefer: Option<&str>,
+    ) -> Result<ConversionResult> {
         let mut actual_value = value;
         let mut parsed_unit = from_input;
 
@@ -154,6 +168,14 @@ impl Converter {
 
         let ranks = crate::models::favorite_ranks(&self.config.favorites);
         outputs.sort_by(|a, b| crate::models::cmp_favorite_rank(&a.unit, &b.unit, &ranks));
+
+        if let Some(prefer) = prefer.filter(|s| !s.is_empty()) {
+            let resolved = self.db.resolve_symbol(prefer)?;
+            if let Some(idx) = outputs.iter().position(|o| o.unit == resolved) {
+                let preferred = outputs.remove(idx);
+                outputs.insert(0, preferred);
+            }
+        }
 
         Ok(ConversionResult {
             input_value: value,
@@ -393,5 +415,25 @@ mod tests {
         let res = converter.convert(1.0, "nanometers").unwrap();
         let cm = res.outputs.iter().find(|o| o.unit == "cm").unwrap();
         assert!((cm.value - 1e-7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn convert_preferring_should_pin_requested_unit_first() {
+        let config = Config::default();
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("USD", 1.0 / 1.1, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("PLN", 0.25, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        let converter = Converter::new(config, db);
+
+        let res = converter
+            .convert_preferring(10.0, "EUR", Some("PLN"))
+            .unwrap();
+        assert_eq!(res.outputs[0].unit, "PLN");
+        assert!((res.outputs[0].value - 40.0).abs() < f64::EPSILON);
+        assert!(res.outputs.iter().any(|o| o.unit == "USD"));
     }
 }

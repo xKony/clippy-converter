@@ -594,25 +594,8 @@ impl AppState {
     fn apply_capture_result(&mut self, capture_result: anyhow::Result<String>) {
         self.capture_pending = false;
 
-        let parsed_opt = capture_result
-            .ok()
-            .and_then(|text| crate::parser::parse_input(&text).ok());
-
-        if let Some(parsed) = parsed_opt {
-            self.captured_value = parsed.value;
-            if let Some(ref unit) = parsed.unit {
-                if let Ok(result) = self.converter.convert(parsed.value, unit) {
-                    self.current_result = Some(result);
-                    self.current_mode = WindowMode::Results;
-                    self.log_conversion_if_enabled();
-                } else {
-                    self.current_result = None;
-                    self.current_mode = WindowMode::SourceUnitSelection;
-                }
-            } else {
-                self.current_result = None;
-                self.current_mode = WindowMode::SourceUnitSelection;
-            }
+        if let Ok(parsed) = capture_result.and_then(|text| crate::parser::parse_input(&text)) {
+            self.apply_parsed_input(parsed);
         } else {
             self.captured_value = 0.0;
             self.current_result = None;
@@ -620,6 +603,30 @@ impl AppState {
             self.manual_input_value = String::new();
         }
         self.focus_main_input = true;
+    }
+
+    fn apply_parsed_input(&mut self, parsed: crate::parser::ParsedInput) {
+        self.captured_value = parsed.value;
+        let Some(unit) = parsed.unit else {
+            self.current_result = None;
+            self.current_mode = WindowMode::SourceUnitSelection;
+            return;
+        };
+
+        if let Ok(result) = self.converter.convert_preferring(
+            parsed.value,
+            &unit,
+            parsed.target.as_deref(),
+        ) {
+            self.current_result = Some(result);
+            self.current_mode = WindowMode::Results;
+            self.log_conversion_if_enabled();
+        } else {
+            self.search_query = unit;
+            self.search_query_lower = self.search_query.to_lowercase();
+            self.current_result = None;
+            self.current_mode = WindowMode::SourceUnitSelection;
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -675,7 +682,7 @@ impl AppState {
         );
         ui.label(
             egui::RichText::new(
-                "Unchecked: Quick convert opens empty. Checked: copies selection first.",
+                "On by default. Unchecked: hotkey opens an empty popup.",
             )
             .small()
             .color(ui.visuals().weak_text_color()),
@@ -885,7 +892,7 @@ impl AppState {
                 let response = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.manual_input_value)
-                            .hint_text("0.00")
+                            .hint_text("100 USD to PLN")
                             .font(egui::TextStyle::Heading)
                             .desired_width(f32::INFINITY),
                     );
@@ -894,12 +901,9 @@ impl AppState {
                     self.focus_main_input = false;
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    && let Ok(val) = self.manual_input_value.parse::<f64>()
+                    && let Ok(parsed) = crate::parser::parse_input(&self.manual_input_value)
                 {
-                    self.captured_value = val;
-                    self.current_mode = WindowMode::SourceUnitSelection;
-                    self.search_query.clear();
-                    self.search_query_lower.clear();
+                    self.apply_parsed_input(parsed);
                     self.focus_main_input = true;
                 }
             });
