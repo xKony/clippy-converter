@@ -4,14 +4,15 @@ This alpha release introduces the core functionality of **Clippy Converter**, a 
 
 ### 🚀 Core Functionalities
 
-*   **Global Hotkey Trigger**: Press `Shift+Alt+C` (configurable) to instantly capture highlighted text or open the conversion window.
+*   **Global Hotkey Trigger**: Press `Shift+Alt+C` (configurable) to instantly capture highlighted text or open the conversion window. Selection capture is on by default.
 *   **Smart Selection Capture**: Automatically simulates `Ctrl+C` to grab selected text, parses it, and opens the converter at your mouse cursor.
 *   **Extensive Unit Support**:
     *   **Fiat Currencies**: 150+ world currencies with daily exchange rate updates.
-    *   **Cryptocurrencies**: Top 500+ crypto assets with hourly price updates via Binance.
-    *   **Physical Units**: Length (`m`, `km`, `in`, `ft`, `mi`, etc.), Weight (`g`, `kg`, `lb`, `oz`, etc.), Temperature (`C`, `F`, `K`), and Time (`s`, `min`, `h`, etc.).
+    *   **Cryptocurrencies**: USDT-quoted Binance pairs with hourly price updates (leveraged / 1000x tokens filtered out).
+    *   **Physical Units**: Length, weight, temperature, time, volume (`L`, `gal`), area (`m2`, `acre`), speed (`km/h`, `mph`), and data (`KB`, `MiB`).
 *   **Intelligent Parsing**:
     *   Recognizes unit aliases (e.g., `ft.` for `ft`, `kilo` for `kg`, `centigrade` for `C`).
+    *   Handles grouped digits (`1,234.56`, `1.234,56`), currency glyphs (`$100`, `100€`), and `to`/`in` targets (`100 USD to PLN`).
     *   Handles currency multipliers (e.g., `5B USD`, `1.2M EUR`).
     *   Supports metric prefixes (e.g., `milligrams`, `kilometers`, `nanometers`).
 *   **Offline-First Architecture**: Uses a local `redb` database to cache exchange rates and conversion factors, ensuring fast startups and offline availability.
