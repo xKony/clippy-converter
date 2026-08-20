@@ -1,12 +1,15 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tracing::warn;
 
-/// Base URL for the `FawazAhmed` fiat currency API (EUR base).
-const FIAT_API_URL: &str =
-    "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.json";
+/// `FawazAhmed` EUR-base feed, jsDelivr first with the documented Cloudflare Pages fallback.
+const FIAT_API_URLS: &[&str] = &[
+    "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.json",
+    "https://latest.currency-api.pages.dev/v1/currencies/eur.json",
+];
 
 /// Base URL for the Binance crypto price API.
 const BINANCE_API_URL: &str = "https://api.binance.com/api/v3/ticker/price";
@@ -53,29 +56,47 @@ pub(crate) struct BinanceTicker {
 
 /// Fetches the latest fiat currency rates from the `FawazAhmed` API.
 ///
+/// Tries jsDelivr first, then the Cloudflare Pages fallback. HTTP error
+/// statuses (`403`, `5xx`, …) fail that URL instead of being parsed as JSON.
+///
 /// # Errors
-/// Returns an error if the network request fails or the response cannot be parsed.
+/// Returns an error if every URL fails to connect, returns a bad status, or cannot be parsed.
 pub async fn fetch_fiat_rates() -> Result<HashMap<String, f64>> {
-    let response: FawazAhmedResponse = HTTP_CLIENT
-        .get(FIAT_API_URL)
+    let mut last_error = None;
+    for url in FIAT_API_URLS {
+        match fetch_fiat_from_url(url).await {
+            Ok(rates) => return Ok(rates),
+            Err(err) => {
+                warn!(url, error = %err, "fiat currency API request failed");
+                last_error = Some(err);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("no fiat API URLs configured")))
+}
+
+async fn fetch_fiat_from_url(url: &str) -> Result<HashMap<String, f64>> {
+    let response = HTTP_CLIENT
+        .get(url)
         .send()
         .await
         .context("Failed to connect to fiat currency API")?
+        .error_for_status()
+        .context("Fiat currency API returned an error status")?;
+    let parsed: FawazAhmedResponse = response
         .json()
         .await
         .context("Failed to parse fiat currency API response")?;
+    Ok(normalize_fiat_rates(parsed.eur))
+}
 
-    let mut rates = response.eur;
-    // Ensure symbols are uppercase for consistency
-    rates = rates
+fn normalize_fiat_rates(eur: HashMap<String, f64>) -> HashMap<String, f64> {
+    let mut rates: HashMap<String, f64> = eur
         .into_iter()
-        .map(|(k, v)| (k.to_uppercase(), v))
+        .map(|(key, value)| (key.to_uppercase(), value))
         .collect();
-
-    // Always include the base rate
     rates.insert("EUR".to_string(), 1.0);
-
-    Ok(rates)
+    rates
 }
 
 /// Fetches crypto price tickers from the Binance API, narrowed to `USDT`-quoted pairs.
@@ -88,11 +109,14 @@ pub async fn fetch_fiat_rates() -> Result<HashMap<String, f64>> {
 /// # Errors
 /// Returns an error if the network request fails or the response cannot be parsed.
 pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
-    let tickers: Vec<BinanceTicker> = HTTP_CLIENT
+    let response = HTTP_CLIENT
         .get(BINANCE_API_URL)
         .send()
         .await
         .context("Failed to connect to Binance API")?
+        .error_for_status()
+        .context("Binance API returned an error status")?;
+    let tickers: Vec<BinanceTicker> = response
         .json()
         .await
         .context("Failed to parse Binance API response")?;
@@ -138,6 +162,21 @@ mod tests {
         }"#;
         let response: FawazAhmedResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.eur.get("usd"), Some(&1.0658));
+    }
+
+    #[test]
+    fn normalize_fiat_rates_should_uppercase_symbols_and_insert_eur() {
+        let mut eur = HashMap::new();
+        eur.insert("usd".to_string(), 1.08);
+        let rates = normalize_fiat_rates(eur);
+        assert_eq!(rates.get("USD"), Some(&1.08));
+        assert_eq!(rates.get("EUR"), Some(&1.0));
+    }
+
+    #[test]
+    fn fiat_api_urls_should_include_cloudflare_pages_fallback() {
+        assert!(FIAT_API_URLS[0].contains("jsdelivr.net"));
+        assert!(FIAT_API_URLS[1].contains("currency-api.pages.dev"));
     }
 
     #[test]

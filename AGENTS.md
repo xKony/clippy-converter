@@ -37,7 +37,7 @@
   - `tempfile`: 3.10
 
 ## 3. Project structure
-- `src/api.rs`: External HTTP requests to Binance and fiat currency APIs (shared `reqwest` client with timeouts; Binance results filtered to USDT pairs, with leveraged/1000x/1M noise pairs dropped).
+- `src/api.rs`: External HTTP requests to Binance and fiat currency APIs (shared `reqwest` client with timeouts; jsDelivr then Cloudflare Pages for fiat, both with `error_for_status`; Binance results filtered to USDT pairs, with leveraged/1000x/1M noise pairs dropped).
 - `src/clipboard.rs`: Clipboard capture via Enigo (Ctrl+C / Cmd+C) and Arboard, with marker-based wait and clipboard restore.
 - `src/converter.rs`: Core engine for calculating unit and currency conversions (cached unit list with invalidation; `convert_preferring` pins an explicit `to`/`in` target).
 - `src/db.rs`: Thread-safe wrapper for redb; batched rate writes; corrupt-entry detection; versioned static unit seed (`STATIC_UNITS` + `meta.static_seed_version`).
@@ -49,15 +49,15 @@
 - `src/parser.rs`: Value extraction: grouped digits, leading/trailing currency glyphs, and `to`/`in` target clauses.
 - `src/placement.rs`: Cursor-relative popup positioning with DPI-aware monitor work-area clamp (Windows `MonitorFromPoint`; 1920×1080 fallback elsewhere).
 - `src/theme.rs`: egui dark theme and spacing.
-- `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring. Settings checkboxes persist immediately; interval/hotkey changes still have a Save & Apply path.
-- `src/workers.rs`: Async Tokio tasks for periodic rate refreshes (`spawn_blocking` for redb I/O, `watch` for config).
+- `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring. Settings checkboxes persist immediately; interval/hotkey changes still have a Save & Apply path. Popup shows cached rate age.
+- `src/workers.rs`: Async Tokio tasks for periodic rate refreshes (`spawn_blocking` for redb I/O, `watch` for config). `RatesStatus` tracks last success/failure for the popup.
 - `icons/`: SVG assets for the popup (close, copy, favorite, switch). Tray currently uses the default `tray-icon` image, not a custom `.ico`.
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns
 - **Rendering strategy:** egui/eframe Immediate Mode UI via `eframe::Renderer::Glow` (OpenGL), running as a background daemon with borderless, always-on-top floating windows at cursor coordinates. Glow is used instead of wgpu because wgpu's DX12 backend on Windows allocated ~200+ MB of GPU memory pools for this small popup (~300 MB RAM); Glow stays near the ~70 MB baseline. `vsync` is enabled; repaint is event-driven (not a busy loop). Stay on egui — do not migrate to Iced or wgpu.
-- **Data fetching patterns:** Background Tokio workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto). Rate writes are batched in one redb transaction and run via `tokio::task::spawn_blocking`. Config interval changes use `tokio::sync::watch` so workers wake early. Crypto pairs are mapped with `.strip_suffix("USDT")` in workers; conversion through EUR uses the cached USDT factor, or `0.92` if USDT is missing.
-- **State management:** App state lives in `AppState`, updated in eframe's `ui`/`run_logic`. Shared config is published over a watch channel; a `RatesVersion` atomic invalidates the converter unit cache after successful refreshes. Clipboard capture and history listing run off the UI thread over `mpsc` channels.
+- **Data fetching patterns:** Background Tokio workers periodically poll APIs (Fawaz Ahmed's API for fiat, Binance for crypto). Rate writes are batched in one redb transaction and run via `tokio::task::spawn_blocking`. Config interval changes use `tokio::sync::watch` so workers wake early. Crypto pairs are mapped with `.strip_suffix("USDT")` in workers; conversion through EUR uses the cached USDT factor and skips the crypto refresh if USDT is missing (no hardcoded 0.92). Fiat tries jsDelivr then the Cloudflare Pages fallback.
+- **State management:** App state lives in `AppState`, updated in eframe's `ui`/`run_logic`. Shared config is published over a watch channel; `RatesStatus` invalidates the converter unit cache after successful refreshes and feeds the popup's last-updated age. Clipboard capture and history listing run off the UI thread over `mpsc` channels.
 - **Database:** `redb` embedded key-value store for offline persistence of exchange rates and unit conversion factors (`units_v2` + `aliases` tables).
 - **Parsing / convert:** `parse_input` returns `ParsedInput { value, unit, target }`. The popup calls `Converter::convert_preferring` so `100 USD to PLN` can pin PLN first. Metric prefixes and currency multipliers (`5B USD`) are handled in the converter, not the parser.
 - **Config defaults:** Fresh installs enable selection capture (`read_selection_on_hotkey: true`). Default hotkey is `Shift+Alt+C`. `config.json` is a non-atomic `fs::write`.
@@ -91,7 +91,7 @@
 - **Global Hotkeys:** OS-level conflicts may arise if `Shift+Alt+C` is already registered by another application.
 - **Clipboard Race Conditions:** Programmatic copy using `enigo` relies on a unique clipboard marker, short delays, and clipboard restoration, which might be sensitive to OS-level clipboard managers.
 - **API Parsing:** Binance pairs are filtered to `*USDT` in `api.rs` (leveraged UP/DOWN/BULL/BEAR and `1000`/`1M` prefixes dropped), then mapped with `.strip_suffix("USDT")` in workers — pairs without a USDT quote are ignored.
-- **Fiat API:** Single jsDelivr URL for Fawaz Ahmed's EUR-base feed; no `error_for_status` and no Cloudflare Pages fallback yet. Fiat API notes live in `currency-exchange-rates-api.md`.
+- **Fiat API:** jsDelivr first, Cloudflare Pages (`latest.currency-api.pages.dev`) as fallback; both use `error_for_status`. Notes live in `currency-exchange-rates-api.md`.
 - **History prune:** Append-only on each conversion; `prune_history_if_needed` runs at startup (and at most once per calendar day) using temp-file + rename.
 - **Startup hide:** eframe force-shows the OS window after the first painted frame (white-flash workaround), overriding `with_visible(false)`. `AppState::startup_hide_done` and a one-shot `ViewportCommand::Visible(false)` in `run_logic` re-hide after that force-show so a black always-on-top box does not linger at startup.
 - **Popup DPI:** OS cursor position is in physical pixels, but `ViewportCommand::OuterPosition` expects logical points (egui-winit multiplies by `pixels_per_point`). `show_converter_window` divides by `ctx.pixels_per_point()`, and `placement::popup_position_at_cursor` takes `pixels_per_point` so the work-area clamp uses the popup's physical size — otherwise the popup is offset on Windows display scaling ≠ 100%.

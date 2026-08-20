@@ -6,11 +6,10 @@ use crate::hotkey;
 use crate::format::{format_copy, format_display};
 use crate::models::{Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo};
 use crate::placement;
-use crate::workers::{ConfigWatchTx, RatesVersion};
+use crate::workers::{ConfigWatchTx, RatesStatus};
 use anyhow::{Context, Result};
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use tracing::{error, warn};
@@ -45,8 +44,8 @@ pub struct AppState {
     pub config: Config,
     /// Publishes config changes so background workers wake and pick up new intervals.
     pub config_tx: ConfigWatchTx,
-    /// Bumped by rate workers; polled to invalidate the unit list cache.
-    pub rates_version: RatesVersion,
+    /// Bumped by rate workers; polled to invalidate the unit list cache. Also holds last-success age.
+    pub rates_status: RatesStatus,
     last_seen_rates_version: u64,
     pub converter: Converter,
     pub clipboard: ClipboardManager,
@@ -200,7 +199,10 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let (recent_res_tx, recent_res_rx) = mpsc::channel::<Vec<HistoryItem>>();
 
     let (config_tx, config_rx) = tokio::sync::watch::channel(config.clone());
-    let rates_version = crate::workers::new_rates_version();
+    let rates_status = RatesStatus::new();
+    if let Ok((fiat, crypto)) = db.latest_currency_timestamps() {
+        rates_status.seed(fiat, crypto);
+    }
 
     // Channel for sending history log entries to the background runtime
     let (history_tx, mut history_rx) =
@@ -214,8 +216,8 @@ pub fn run(config: Config, db: Db) -> Result<()> {
         let db_crypto = db;
         let config_fiat = config_rx.clone();
         let config_crypto = config_rx;
-        let rates_fiat = rates_version.clone();
-        let rates_crypto = rates_version.clone();
+        let rates_fiat = rates_status.clone();
+        let rates_crypto = rates_status.clone();
 
         move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -327,7 +329,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             Ok(Box::new(AppState {
                 config,
                 config_tx,
-                rates_version: rates_version.clone(),
+                rates_status: rates_status.clone(),
                 last_seen_rates_version: 0,
                 converter,
                 clipboard,
@@ -399,7 +401,7 @@ impl AppState {
             }
         }
 
-        let rates_v = self.rates_version.load(Ordering::Relaxed);
+        let rates_v = self.rates_status.version();
         if rates_v != self.last_seen_rates_version {
             self.converter.invalidate_units_cache();
             self.unit_filter_query = None;
@@ -524,6 +526,21 @@ impl AppState {
         if self.config_tx.send(self.config.clone()).is_err() {
             warn!("config watch has no receivers");
         }
+    }
+
+    fn render_rate_freshness(&self, ui: &mut egui::Ui) {
+        let snap = self.rates_status.snapshot();
+        let now = chrono::Utc::now().timestamp();
+        let color = if snap.is_stale(now) {
+            egui::Color32::from_rgb(232, 176, 80)
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.label(
+            egui::RichText::new(snap.summary_line(now))
+                .small()
+                .color(color),
+        );
     }
 
     fn apply_recorded_hotkey(&mut self) {
@@ -957,6 +974,8 @@ impl AppState {
         });
 
         ui.add_space(5.0);
+
+        self.render_rate_freshness(ui);
 
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {

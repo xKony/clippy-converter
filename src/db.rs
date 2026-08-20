@@ -349,6 +349,27 @@ impl Db {
         Ok(units)
     }
 
+    /// Latest fiat and crypto timestamps from cached currency rows (startup seed for the UI).
+    ///
+    /// # Errors
+    /// Returns an error if the read transaction or iteration fails.
+    pub fn latest_currency_timestamps(&self) -> Result<(Option<i64>, Option<i64>)> {
+        let units = self.get_category_units(UnitCategory::Currency as u8)?;
+        let mut fiat: Option<i64> = None;
+        let mut crypto: Option<i64> = None;
+        for (_, entry) in units {
+            if entry.timestamp <= 0 {
+                continue;
+            }
+            if entry.source == RateSource::Fiat as u8 {
+                fiat = Some(fiat.map_or(entry.timestamp, |prev| prev.max(entry.timestamp)));
+            } else if entry.source == RateSource::Crypto as u8 {
+                crypto = Some(crypto.map_or(entry.timestamp, |prev| prev.max(entry.timestamp)));
+            }
+        }
+        Ok((fiat, crypto))
+    }
+
     /// Updates a unit in the database.
     ///
     /// # Errors
@@ -1043,6 +1064,26 @@ mod tests {
         assert_eq!(updated, 0);
         let pln = db.get_unit("PLN").unwrap().unwrap();
         assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn latest_currency_timestamps_should_return_newest_fiat_and_crypto() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        db.update_rate("USD", 1.08, 1000, RateSource::Fiat).unwrap();
+        db.update_rate("PLN", 4.0, 2000, RateSource::Fiat).unwrap();
+        db.update_rate("BTC", 50_000.0, 1500, RateSource::Crypto)
+            .unwrap();
+        db.update_rate("ETH", 3_000.0, 1800, RateSource::Crypto)
+            .unwrap();
+
+        let (fiat, crypto) = db.latest_currency_timestamps().unwrap();
+        assert_eq!(fiat, Some(2000));
+        assert_eq!(crypto, Some(1800));
     }
 
     #[test]
