@@ -69,6 +69,8 @@
 - `cargo build --release`: Compiles the optimized production binary.
 - `cargo test`: Executes the unit test suite across all modules.
 - `cargo clippy`: Runs strict linting based on Cargo.toml configurations.
+- CI (`./.github/workflows/ci.yml`): `cargo test --locked` and `cargo clippy --all-targets --locked -- -D warnings` on `windows-latest`.
+- Release (`./.github/workflows/release.yml`): Windows `cargo build --release` artifact (`clippy-converter.exe`) on version tags or manual dispatch.
 
 ## 6. Environment variables
 - No `.env` file is required. Configuration is managed via a local `config.json` in the OS-specific user config directory (`directories` crate: `ProjectDirs::from("com", "clippy", "clippy-converter")` → `%AppData%\clippy\clippy-converter\config.json` on Windows).

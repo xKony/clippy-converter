@@ -94,6 +94,8 @@ cargo run
 cargo build --release
 ```
 
+CI runs `cargo test` and `cargo clippy` on Windows for every push to `main`. Tagged `v*` pushes (or a manual workflow run) upload `clippy-converter.exe`.
+
 ### Configuration
 
 The application creates a `config.json` file in the user's default configuration directory (`%AppData%\clippy\clippy-converter\config.json` on Windows).
