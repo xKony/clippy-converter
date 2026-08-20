@@ -31,9 +31,6 @@ pub fn format_display(value: f64, precision: usize, separator: ThousandSeparator
 /// Formats a number for clipboard copy (no thousand separators).
 #[must_use]
 pub fn format_copy(value: f64) -> String {
-    if !value.is_finite() {
-        return value.to_string();
-    }
     value.to_string()
 }
 
@@ -44,20 +41,24 @@ fn group_integer(integer: &str, separator: ThousandSeparator) -> String {
         ThousandSeparator::Comma => ',',
     };
 
-    let chars: Vec<char> = integer.chars().collect();
-    if chars.len() <= 3 {
+    let len = integer.len();
+    if len <= 3 {
         return integer.to_string();
     }
 
-    let mut out = String::new();
-    let first_group = chars.len() % 3;
-    let start = if first_group == 0 { 3 } else { first_group };
-
-    for (idx, ch) in chars.iter().enumerate() {
-        if idx == start || (idx > start && (idx - start).is_multiple_of(3)) {
+    // `integer` is ASCII digits from `format!("{value:.precision$}")`.
+    let remainder = len % 3;
+    let mut out = String::with_capacity(len + len / 3);
+    if remainder > 0 {
+        out.push_str(&integer[..remainder]);
+    }
+    for chunk in integer.as_bytes()[remainder..].chunks(3) {
+        if !out.is_empty() {
             out.push(sep);
         }
-        out.push(*ch);
+        if let Ok(part) = std::str::from_utf8(chunk) {
+            out.push_str(part);
+        }
     }
     out
 }

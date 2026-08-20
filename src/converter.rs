@@ -152,26 +152,8 @@ impl Converter {
         outputs.sort_by(|a, b| a.unit.cmp(&b.unit));
         outputs.dedup_by(|a, b| a.unit == b.unit);
 
-        // Sorting logic: favorites first. Build the favorite-rank lookup once
-        // rather than scanning the favorites list on every comparison.
-        let favorite_ranks: std::collections::HashMap<&str, usize> = self
-            .config
-            .favorites
-            .iter()
-            .enumerate()
-            .map(|(idx, fav)| (fav.as_str(), idx))
-            .collect();
-        outputs.sort_by(|a, b| {
-            let a_fav = favorite_ranks.get(a.unit.as_str());
-            let b_fav = favorite_ranks.get(b.unit.as_str());
-
-            match (a_fav, b_fav) {
-                (Some(ai), Some(bi)) => ai.cmp(bi),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.unit.cmp(&b.unit),
-            }
-        });
+        let ranks = crate::models::favorite_ranks(&self.config.favorites);
+        outputs.sort_by(|a, b| crate::models::cmp_favorite_rank(&a.unit, &b.unit, &ranks));
 
         Ok(ConversionResult {
             input_value: value,
@@ -181,60 +163,64 @@ impl Converter {
     }
 }
 
-/// Extracts a currency multiplier from the start of the unit string.
+/// Matches an ASCII prefix table against `input`.
 ///
 /// # Safety invariant
 /// All prefixes must be pure ASCII so that `prefix.len()` is valid
 /// for slicing both the lowercase and original mixed-case strings.
-fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
-    let input = input.trim();
-    let multipliers = [
-        ("k ", 1e3),
-        ("m ", 1e6),
-        ("b ", 1e9),
-        ("t ", 1e12),
-        ("thousand ", 1e3),
-        ("million ", 1e6),
-        ("billion ", 1e9),
-        ("trillion ", 1e12),
-    ];
+fn prefix_factor<'a>(input: &'a str, prefixes: &[(&str, f64)]) -> Option<(f64, &'a str)> {
     let lower = input.to_lowercase();
-    for (prefix, factor) in multipliers {
-        debug_assert!(prefix.is_ascii(), "Multiplier prefixes must be ASCII");
-        if lower.starts_with(prefix) {
-            return Some((factor, input[prefix.len()..].trim()));
-        }
-    }
-    None
-}
-
-/// Extracts a metric prefix (e.g., "kilo", "nano") from the start of the unit string.
-fn extract_metric_prefix(input: &str) -> Option<(f64, &str)> {
-    let lower = input.to_lowercase();
-    let prefixes = [
-        ("exa", 1e18),
-        ("peta", 1e15),
-        ("tera", 1e12),
-        ("giga", 1e9),
-        ("mega", 1e6),
-        ("kilo", 1e3),
-        ("hecto", 1e2),
-        ("deca", 1e1),
-        ("deci", 1e-1),
-        ("centi", 1e-2),
-        ("milli", 1e-3),
-        ("micro", 1e-6),
-        ("nano", 1e-9),
-        ("pico", 1e-12),
-        ("femto", 1e-15),
-        ("atto", 1e-18),
-    ];
-    for (prefix, factor) in prefixes {
+    for &(prefix, factor) in prefixes {
+        debug_assert!(prefix.is_ascii(), "prefixes must be ASCII");
         if lower.starts_with(prefix) {
             return Some((factor, &input[prefix.len()..]));
         }
     }
     None
+}
+
+/// Extracts a currency multiplier from the start of the unit string.
+fn extract_currency_multiplier(input: &str) -> Option<(f64, &str)> {
+    let input = input.trim();
+    prefix_factor(
+        input,
+        &[
+            ("k ", 1e3),
+            ("m ", 1e6),
+            ("b ", 1e9),
+            ("t ", 1e12),
+            ("thousand ", 1e3),
+            ("million ", 1e6),
+            ("billion ", 1e9),
+            ("trillion ", 1e12),
+        ],
+    )
+    .map(|(factor, rest)| (factor, rest.trim()))
+}
+
+/// Extracts a metric prefix (e.g., "kilo", "nano") from the start of the unit string.
+fn extract_metric_prefix(input: &str) -> Option<(f64, &str)> {
+    prefix_factor(
+        input,
+        &[
+            ("exa", 1e18),
+            ("peta", 1e15),
+            ("tera", 1e12),
+            ("giga", 1e9),
+            ("mega", 1e6),
+            ("kilo", 1e3),
+            ("hecto", 1e2),
+            ("deca", 1e1),
+            ("deci", 1e-1),
+            ("centi", 1e-2),
+            ("milli", 1e-3),
+            ("micro", 1e-6),
+            ("nano", 1e-9),
+            ("pico", 1e-12),
+            ("femto", 1e-15),
+            ("atto", 1e-18),
+        ],
+    )
 }
 
 #[cfg(test)]

@@ -38,18 +38,6 @@ pub struct HistoryLogEntry {
     pub input_unit: String,
     pub output_value: f64,
     pub output_unit: String,
-    pub retention_days: Option<i64>,
-}
-
-impl std::fmt::Display for HistoryRetention {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SevenDays => write!(f, "7 Days"),
-            Self::ThirtyDays => write!(f, "30 Days"),
-            Self::OneYear => write!(f, "1 Year"),
-            Self::Never => write!(f, "Never"),
-        }
-    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -257,7 +245,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                             &entry.input_unit,
                             entry.output_value,
                             &entry.output_unit,
-                            entry.retention_days,
                         )
                         .await
                         {
@@ -537,7 +524,6 @@ impl AppState {
                 input_unit: result.input_unit.clone(),
                 output_value: first_output.value,
                 output_unit: first_output.unit.clone(),
-                retention_days: self.config.history_retention.to_days(),
             })
         {
             warn!(error = %err, "history log channel full or closed; dropping entry");
@@ -1288,20 +1274,9 @@ impl AppState {
     }
 
     fn sort_units_favorites_first(units: &mut [UnitInfo], favorites: &[String]) {
-        // Build the favorite-rank lookup once instead of scanning the favorites
-        // list on every comparison.
-        let ranks: std::collections::HashMap<&str, usize> = favorites
-            .iter()
-            .enumerate()
-            .map(|(idx, fav)| (fav.as_str(), idx))
-            .collect();
+        let ranks = crate::models::favorite_ranks(favorites);
         units.sort_by(|a, b| {
-            match (ranks.get(a.symbol.as_str()), ranks.get(b.symbol.as_str())) {
-                (Some(ai), Some(bi)) => ai.cmp(bi),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.symbol.cmp(&b.symbol),
-            }
+            crate::models::cmp_favorite_rank(&a.symbol, &b.symbol, &ranks)
         });
     }
 }

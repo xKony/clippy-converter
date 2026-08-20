@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +63,26 @@ impl HistoryRetention {
             Self::OneYear => Some(365),
             Self::Never => None,
         }
+    }
+}
+
+/// Favorite-rank lookup built once so sorts don't scan the list per comparison.
+#[must_use]
+pub(crate) fn favorite_ranks(favorites: &[String]) -> HashMap<&str, usize> {
+    favorites
+        .iter()
+        .enumerate()
+        .map(|(idx, fav)| (fav.as_str(), idx))
+        .collect()
+}
+
+#[must_use]
+pub(crate) fn cmp_favorite_rank(a: &str, b: &str, ranks: &HashMap<&str, usize>) -> Ordering {
+    match (ranks.get(a), ranks.get(b)) {
+        (Some(ai), Some(bi)) => ai.cmp(bi),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.cmp(b),
     }
 }
 

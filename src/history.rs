@@ -88,7 +88,6 @@ pub async fn log_conversion(
     input_unit: &str,
     output_value: f64,
     output_unit: &str,
-    _retention_days: Option<i64>,
 ) -> Result<()> {
     let path = get_history_path()?;
 

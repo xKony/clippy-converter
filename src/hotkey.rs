@@ -35,60 +35,57 @@ pub fn parse_hotkey(s: &str) -> Result<HotKey> {
     Ok(HotKey::new(Some(modifiers), code))
 }
 
+const LETTER_CODES: [Code; 26] = [
+    Code::KeyA,
+    Code::KeyB,
+    Code::KeyC,
+    Code::KeyD,
+    Code::KeyE,
+    Code::KeyF,
+    Code::KeyG,
+    Code::KeyH,
+    Code::KeyI,
+    Code::KeyJ,
+    Code::KeyK,
+    Code::KeyL,
+    Code::KeyM,
+    Code::KeyN,
+    Code::KeyO,
+    Code::KeyP,
+    Code::KeyQ,
+    Code::KeyR,
+    Code::KeyS,
+    Code::KeyT,
+    Code::KeyU,
+    Code::KeyV,
+    Code::KeyW,
+    Code::KeyX,
+    Code::KeyY,
+    Code::KeyZ,
+];
+
+const DIGIT_CODES: [Code; 10] = [
+    Code::Digit0,
+    Code::Digit1,
+    Code::Digit2,
+    Code::Digit3,
+    Code::Digit4,
+    Code::Digit5,
+    Code::Digit6,
+    Code::Digit7,
+    Code::Digit8,
+    Code::Digit9,
+];
+
 /// Maps a string to a `Code` enum variant.
 fn parse_code(s: &str) -> Result<Code> {
-    // Attempt to handle common alphanumeric keys
-    if s.len() == 1 {
-        let c = s
-            .chars()
-            .next()
-            .context("Empty key string")?
-            .to_ascii_uppercase();
-        if c.is_ascii_alphabetic() {
-            return Ok(match c {
-                'A' => Code::KeyA,
-                'B' => Code::KeyB,
-                'C' => Code::KeyC,
-                'D' => Code::KeyD,
-                'E' => Code::KeyE,
-                'F' => Code::KeyF,
-                'G' => Code::KeyG,
-                'H' => Code::KeyH,
-                'I' => Code::KeyI,
-                'J' => Code::KeyJ,
-                'K' => Code::KeyK,
-                'L' => Code::KeyL,
-                'M' => Code::KeyM,
-                'N' => Code::KeyN,
-                'O' => Code::KeyO,
-                'P' => Code::KeyP,
-                'Q' => Code::KeyQ,
-                'R' => Code::KeyR,
-                'S' => Code::KeyS,
-                'T' => Code::KeyT,
-                'U' => Code::KeyU,
-                'V' => Code::KeyV,
-                'W' => Code::KeyW,
-                'X' => Code::KeyX,
-                'Y' => Code::KeyY,
-                'Z' => Code::KeyZ,
-                _ => unreachable!(),
-            });
+    if let [byte] = s.as_bytes() {
+        let upper = byte.to_ascii_uppercase();
+        if upper.is_ascii_uppercase() {
+            return Ok(LETTER_CODES[usize::from(upper - b'A')]);
         }
-        if c.is_ascii_digit() {
-            return Ok(match c {
-                '0' => Code::Digit0,
-                '1' => Code::Digit1,
-                '2' => Code::Digit2,
-                '3' => Code::Digit3,
-                '4' => Code::Digit4,
-                '5' => Code::Digit5,
-                '6' => Code::Digit6,
-                '7' => Code::Digit7,
-                '8' => Code::Digit8,
-                '9' => Code::Digit9,
-                _ => unreachable!(),
-            });
+        if byte.is_ascii_digit() {
+            return Ok(DIGIT_CODES[usize::from(*byte - b'0')]);
         }
     }
 
@@ -127,6 +124,14 @@ mod tests {
         let hk = parse_hotkey("Ctrl+Space").unwrap();
         assert_eq!(hk.mods, Modifiers::CONTROL);
         assert_eq!(hk.key, Code::Space);
+
+        let hk = parse_hotkey("Alt+1").unwrap();
+        assert_eq!(hk.mods, Modifiers::ALT);
+        assert_eq!(hk.key, Code::Digit1);
+
+        let hk = parse_hotkey("shift+a").unwrap();
+        assert_eq!(hk.mods, Modifiers::SHIFT);
+        assert_eq!(hk.key, Code::KeyA);
     }
 
     #[test]

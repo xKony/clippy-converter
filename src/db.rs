@@ -394,10 +394,7 @@ impl Db {
                 .open_table(ALIASES_TABLE)
                 .context("Failed to open aliases table")?;
 
-            init_length_units(&mut units, &mut aliases)?;
-            init_weight_units(&mut units, &mut aliases)?;
-            init_temperature_units(&mut units, &mut aliases)?;
-            init_time_units(&mut units, &mut aliases)?;
+            seed_static_units(&mut units, &mut aliases)?;
         }
         write_txn
             .commit()
@@ -406,31 +403,191 @@ impl Db {
     }
 }
 
+struct StaticUnit {
+    symbol: &'static str,
+    category: UnitCategory,
+    factor: f64,
+    offset: f64,
+    aliases: &'static [&'static str],
+}
+
+/// Static length/weight/temperature/time units seeded on first launch.
+/// Temperature: Base = (Input + Offset) * Factor, Target = (Base / Factor) - Offset.
+/// Celsius is the base (factor=1, offset=0); F uses (F-32)*5/9; K uses K-273.15.
+const STATIC_UNITS: &[StaticUnit] = &[
+    StaticUnit {
+        symbol: "m",
+        category: UnitCategory::Length,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["meter", "meters", "metre", "metres"],
+    },
+    StaticUnit {
+        symbol: "km",
+        category: UnitCategory::Length,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilometer", "kilometers", "kilometre", "kilometres"],
+    },
+    StaticUnit {
+        symbol: "cm",
+        category: UnitCategory::Length,
+        factor: 0.01,
+        offset: 0.0,
+        aliases: &["centimeter", "centimeters", "centimetre", "centimetres"],
+    },
+    StaticUnit {
+        symbol: "mm",
+        category: UnitCategory::Length,
+        factor: 0.001,
+        offset: 0.0,
+        aliases: &["millimeter", "millimeters", "millimetre", "millimetres"],
+    },
+    StaticUnit {
+        symbol: "in",
+        category: UnitCategory::Length,
+        factor: 0.0254,
+        offset: 0.0,
+        aliases: &["inch", "inches"],
+    },
+    StaticUnit {
+        symbol: "ft",
+        category: UnitCategory::Length,
+        factor: 0.3048,
+        offset: 0.0,
+        aliases: &["foot", "feet", "ft."],
+    },
+    StaticUnit {
+        symbol: "yd",
+        category: UnitCategory::Length,
+        factor: 0.9144,
+        offset: 0.0,
+        aliases: &["yard", "yards"],
+    },
+    StaticUnit {
+        symbol: "mi",
+        category: UnitCategory::Length,
+        factor: 1609.344,
+        offset: 0.0,
+        aliases: &["mile", "miles"],
+    },
+    StaticUnit {
+        symbol: "g",
+        category: UnitCategory::Weight,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["gram", "grams", "gr"],
+    },
+    StaticUnit {
+        symbol: "kg",
+        category: UnitCategory::Weight,
+        factor: 1000.0,
+        offset: 0.0,
+        aliases: &["kilogram", "kilograms", "kilo"],
+    },
+    StaticUnit {
+        symbol: "mg",
+        category: UnitCategory::Weight,
+        factor: 0.001,
+        offset: 0.0,
+        aliases: &["milligram", "milligrams"],
+    },
+    StaticUnit {
+        symbol: "lb",
+        category: UnitCategory::Weight,
+        factor: 453.592_37,
+        offset: 0.0,
+        aliases: &["pound", "pounds", "lbs"],
+    },
+    StaticUnit {
+        symbol: "oz",
+        category: UnitCategory::Weight,
+        factor: 28.349_523_125,
+        offset: 0.0,
+        aliases: &["ounce", "ounces"],
+    },
+    StaticUnit {
+        symbol: "C",
+        category: UnitCategory::Temperature,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["Celsius", "celsius", "centigrade"],
+    },
+    StaticUnit {
+        symbol: "F",
+        category: UnitCategory::Temperature,
+        factor: 5.0 / 9.0,
+        offset: -32.0,
+        aliases: &["Fahrenheit", "fahrenheit"],
+    },
+    StaticUnit {
+        symbol: "K",
+        category: UnitCategory::Temperature,
+        factor: 1.0,
+        offset: -273.15,
+        aliases: &["Kelvin", "kelvin"],
+    },
+    StaticUnit {
+        symbol: "s",
+        category: UnitCategory::Time,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["second", "seconds", "sec"],
+    },
+    StaticUnit {
+        symbol: "ms",
+        category: UnitCategory::Time,
+        factor: 0.001,
+        offset: 0.0,
+        aliases: &["millisecond", "milliseconds"],
+    },
+    StaticUnit {
+        symbol: "min",
+        category: UnitCategory::Time,
+        factor: 60.0,
+        offset: 0.0,
+        aliases: &["minute", "minutes"],
+    },
+    StaticUnit {
+        symbol: "h",
+        category: UnitCategory::Time,
+        factor: 3600.0,
+        offset: 0.0,
+        aliases: &["hour", "hours"],
+    },
+];
+
+fn seed_static_units(
+    units: &mut redb::Table<&str, UnitEntry>,
+    aliases: &mut redb::Table<&str, &str>,
+) -> Result<()> {
+    for unit in STATIC_UNITS {
+        add_unit_static(units, aliases, unit)?;
+    }
+    Ok(())
+}
+
 /// Helper to add a unit and its variations to the database.
 /// Skips insertion if the unit already exists to avoid overwriting on every launch.
 fn add_unit_static(
     units: &mut redb::Table<&str, UnitEntry>,
     aliases: &mut redb::Table<&str, &str>,
-    sym: &str,
-    cat: UnitCategory,
-    factor: f64,
-    offset: f64,
-    variations: &[&str],
+    unit: &StaticUnit,
 ) -> Result<()> {
     // Only insert if the unit doesn't already exist
     let exists = units
-        .get(sym)
+        .get(unit.symbol)
         .context("Failed to check existing unit")?
         .is_some();
 
     if !exists {
         units
             .insert(
-                sym,
+                unit.symbol,
                 UnitEntry {
-                    factor,
-                    offset,
-                    category: cat as u8,
+                    factor: unit.factor,
+                    offset: unit.offset,
+                    category: unit.category as u8,
                     timestamp: 0,
                     source: RateSource::Static as u8,
                 },
@@ -438,226 +595,14 @@ fn add_unit_static(
             .context("Failed to insert static unit")?;
     }
 
-    for v in variations {
-        aliases.insert(*v, sym).context("Failed to insert alias")?;
+    for v in unit.aliases {
         aliases
-            .insert(v.to_lowercase().as_str(), sym)
+            .insert(*v, unit.symbol)
+            .context("Failed to insert alias")?;
+        aliases
+            .insert(v.to_lowercase().as_str(), unit.symbol)
             .context("Failed to insert lowercase alias")?;
     }
-    Ok(())
-}
-
-fn init_length_units(
-    units: &mut redb::Table<&str, UnitEntry>,
-    aliases: &mut redb::Table<&str, &str>,
-) -> Result<()> {
-    add_unit_static(
-        units,
-        aliases,
-        "m",
-        UnitCategory::Length,
-        1.0,
-        0.0,
-        &["meter", "meters", "metre", "metres"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "km",
-        UnitCategory::Length,
-        1000.0,
-        0.0,
-        &["kilometer", "kilometers", "kilometre", "kilometres"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "cm",
-        UnitCategory::Length,
-        0.01,
-        0.0,
-        &["centimeter", "centimeters", "centimetre", "centimetres"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "mm",
-        UnitCategory::Length,
-        0.001,
-        0.0,
-        &["millimeter", "millimeters", "millimetre", "millimetres"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "in",
-        UnitCategory::Length,
-        0.0254,
-        0.0,
-        &["inch", "inches"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "ft",
-        UnitCategory::Length,
-        0.3048,
-        0.0,
-        &["foot", "feet", "ft."],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "yd",
-        UnitCategory::Length,
-        0.9144,
-        0.0,
-        &["yard", "yards"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "mi",
-        UnitCategory::Length,
-        1609.344,
-        0.0,
-        &["mile", "miles"],
-    )?;
-    Ok(())
-}
-
-fn init_weight_units(
-    units: &mut redb::Table<&str, UnitEntry>,
-    aliases: &mut redb::Table<&str, &str>,
-) -> Result<()> {
-    add_unit_static(
-        units,
-        aliases,
-        "g",
-        UnitCategory::Weight,
-        1.0,
-        0.0,
-        &["gram", "grams", "gr"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "kg",
-        UnitCategory::Weight,
-        1000.0,
-        0.0,
-        &["kilogram", "kilograms", "kilo"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "mg",
-        UnitCategory::Weight,
-        0.001,
-        0.0,
-        &["milligram", "milligrams"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "lb",
-        UnitCategory::Weight,
-        453.592_37,
-        0.0,
-        &["pound", "pounds", "lbs"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "oz",
-        UnitCategory::Weight,
-        28.349_523_125,
-        0.0,
-        &["ounce", "ounces"],
-    )?;
-    Ok(())
-}
-
-fn init_temperature_units(
-    units: &mut redb::Table<&str, UnitEntry>,
-    aliases: &mut redb::Table<&str, &str>,
-) -> Result<()> {
-    // Conversion formula: Base = (Input + Offset) * Factor
-    //                     Target = (Base / Factor) - Offset
-    //
-    // Celsius is the base unit (factor=1, offset=0).
-    // For Fahrenheit: Base_C = (F_input + (-32)) * (5/9) = (F - 32) * 5/9
-    // For Kelvin:     Base_C = (K_input + (-273.15)) * 1.0 = K - 273.15
-    add_unit_static(
-        units,
-        aliases,
-        "C",
-        UnitCategory::Temperature,
-        1.0,
-        0.0,
-        &["Celsius", "celsius", "centigrade"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "F",
-        UnitCategory::Temperature,
-        5.0 / 9.0,
-        -32.0, // Offset applied before factor: (F - 32) * 5/9 = Celsius
-        &["Fahrenheit", "fahrenheit"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "K",
-        UnitCategory::Temperature,
-        1.0,
-        -273.15, // Offset applied before factor: (K - 273.15) * 1.0 = Celsius
-        &["Kelvin", "kelvin"],
-    )?;
-    Ok(())
-}
-
-fn init_time_units(
-    units: &mut redb::Table<&str, UnitEntry>,
-    aliases: &mut redb::Table<&str, &str>,
-) -> Result<()> {
-    add_unit_static(
-        units,
-        aliases,
-        "s",
-        UnitCategory::Time,
-        1.0,
-        0.0,
-        &["second", "seconds", "sec"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "ms",
-        UnitCategory::Time,
-        0.001,
-        0.0,
-        &["millisecond", "milliseconds"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "min",
-        UnitCategory::Time,
-        60.0,
-        0.0,
-        &["minute", "minutes"],
-    )?;
-    add_unit_static(
-        units,
-        aliases,
-        "h",
-        UnitCategory::Time,
-        3600.0,
-        0.0,
-        &["hour", "hours"],
-    )?;
     Ok(())
 }
 
