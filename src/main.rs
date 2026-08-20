@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 pub mod api;
+pub mod autostart;
 pub mod clipboard;
 pub mod converter;
 pub mod format;

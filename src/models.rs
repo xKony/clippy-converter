@@ -32,6 +32,9 @@ pub struct Config {
     /// Optional extra unit groups. Core length/weight/temperature/time/currency stay on.
     #[serde(default)]
     pub unit_packs: UnitPacks,
+    /// Write this executable into the current-user Windows Run key.
+    #[serde(default)]
+    pub start_with_windows: bool,
 }
 
 /// Visual grouping of digits in displayed numbers.
@@ -180,6 +183,7 @@ impl Default for Config {
             crypto_update_interval_mins: 60, // Every hour
             thousand_separator: ThousandSeparator::None,
             unit_packs: UnitPacks::default(),
+            start_with_windows: false,
         }
     }
 }
@@ -382,5 +386,6 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(config.unit_packs.volume);
         assert!(!config.unit_packs.scientific);
+        assert!(!config.start_with_windows);
     }
 }

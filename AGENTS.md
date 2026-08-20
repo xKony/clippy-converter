@@ -32,12 +32,13 @@
   - `single-instance`: 0.3.3
   - `tracing`: 0.1
   - `tracing-subscriber`: 0.3 (features: ["env-filter"])
-- **Windows-only:** `windows`: 0.58 (features: Win32 Foundation / Gdi / WindowsAndMessaging) — monitor work-area for popup clamp in `placement.rs`.
+- **Windows-only:** `windows`: 0.58 (features: Win32 Foundation / Gdi / WindowsAndMessaging / Registry) — monitor work-area for popup clamp in `placement.rs`, Start-with-Windows Run key in `autostart.rs`.
 - **Dev Dependencies:**
   - `tempfile`: 3.10
 
 ## 3. Project structure
 - `src/api.rs`: External HTTP requests to Binance and fiat currency APIs (shared `reqwest` client with timeouts; jsDelivr then Cloudflare Pages for fiat, both with `error_for_status`; Binance results filtered to USDT pairs, with leveraged/1000x/1M noise pairs dropped).
+- `src/autostart.rs`: Windows current-user Run key (`Start with Windows` setting).
 - `src/clipboard.rs`: Clipboard capture via Enigo (Ctrl+C / Cmd+C) and Arboard, with marker-based wait and clipboard restore.
 - `src/converter.rs`: Core engine for calculating unit and currency conversions (cached unit list with invalidation; `convert_preferring` pins an explicit `to`/`in` target).
 - `src/db.rs`: Thread-safe wrapper for redb; batched rate writes; corrupt-entry detection; versioned static unit seed (`STATIC_UNITS` + `meta.static_seed_version`).
@@ -51,7 +52,7 @@
 - `src/theme.rs`: egui dark theme and spacing.
 - `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring. Settings checkboxes persist immediately; interval/hotkey changes still have a Save & Apply path. Popup shows cached rate age.
 - `src/workers.rs`: Async Tokio tasks for periodic rate refreshes (`spawn_blocking` for redb I/O, `watch` for config). `RatesStatus` tracks last success/failure for the popup.
-- `icons/`: SVG assets for the popup (close, copy, favorite, switch). Tray currently uses the default `tray-icon` image, not a custom `.ico`.
+- `icons/`: SVG assets for the popup (close, copy, favorite, switch). Tray uses a generated 32×32 RGBA icon (blue disk with a C).
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns

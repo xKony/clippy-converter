@@ -111,6 +111,39 @@ const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(2);
 /// How many recent conversions to show in the popup.
 const RECENT_HISTORY_LIMIT: usize = 10;
 
+fn make_tray_icon() -> Result<tray_icon::Icon> {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0_u8; SIZE as usize * SIZE as usize * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let Ok(x_i) = i32::try_from(x) else {
+                continue;
+            };
+            let Ok(y_i) = i32::try_from(y) else {
+                continue;
+            };
+            let dx = x_i - 16;
+            let dy = y_i - 16;
+            let dist2 = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+            let on_ring = (49..=169).contains(&dist2);
+            let in_gap = dx > 2 && dy.unsigned_abs() < 6_u32 && dist2 < 169;
+            let i = ((y * SIZE + x) * 4) as usize;
+            if on_ring && !in_gap {
+                rgba[i] = 255;
+                rgba[i + 1] = 255;
+                rgba[i + 2] = 255;
+                rgba[i + 3] = 255;
+            } else if dist2 <= 225 {
+                rgba[i] = 70;
+                rgba[i + 1] = 130;
+                rgba[i + 2] = 230;
+                rgba[i + 3] = 255;
+            }
+        }
+    }
+    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).context("Failed to build tray icon")
+}
+
 fn apply_converter_viewport(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
@@ -181,9 +214,14 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     ])
     .context("Failed to create tray menu")?;
 
+    if let Err(err) = crate::autostart::set_enabled(config.start_with_windows) {
+        warn!(error = %err, "failed to sync Start with Windows");
+    }
+
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Clippy Converter")
+        .with_icon(make_tray_icon()?)
         .build()
         .context("Failed to create tray icon")?;
 
@@ -526,6 +564,9 @@ impl AppState {
         if self.config_tx.send(self.config.clone()).is_err() {
             warn!("config watch has no receivers");
         }
+        if let Err(err) = crate::autostart::set_enabled(self.config.start_with_windows) {
+            error!(error = %err, "failed to update Start with Windows");
+        }
     }
 
     fn render_rate_freshness(&self, ui: &mut egui::Ui) {
@@ -750,6 +791,19 @@ impl AppState {
             .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(2.0);
+
+        #[cfg(windows)]
+        {
+            if ui
+                .checkbox(
+                    &mut self.config.start_with_windows,
+                    "Start with Windows",
+                )
+                .changed()
+            {
+                self.persist_config();
+            }
+        }
 
         ui.separator();
 
