@@ -336,6 +336,17 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 }
             });
 
+            // Second-launch activation: surface this instance (open settings)
+            // when another process pings the shared activation event.
+            {
+                let tx_activation = tx.clone();
+                let ctx_activation = cc.egui_ctx.clone();
+                crate::activation::spawn_activation_thread(move || {
+                    let _ = tx_activation.send(EventMsg::OpenSettings);
+                    ctx_activation.request_repaint();
+                });
+            }
+
             // Clipboard capture worker: owns its own clipboard handle and wakes the
             // UI as soon as a capture completes, so the popup doesn't wait for the
             // next incidental OS event to process the result.

@@ -1,11 +1,12 @@
 #![windows_subsystem = "windows"]
 
+pub mod activation;
 pub mod api;
 pub mod autostart;
 pub mod clipboard;
 pub mod converter;
-pub mod format;
 pub mod db;
+pub mod format;
 pub mod history;
 pub mod hotkey;
 pub mod models;
@@ -38,9 +39,14 @@ fn main() -> Result<()> {
         .context("Failed to create single instance lock")?;
 
     if !instance.is_single() {
-        return Err(anyhow::anyhow!(
-            "Another instance of Clippy Converter is already running. Exiting."
-        ));
+        // Surface the live instance instead of exiting looking like a crash.
+        if let Err(err) = activation::notify_running_instance() {
+            return Err(err.context(
+                "Another instance of Clippy Converter is already running, but could not be activated",
+            ));
+        }
+        info!("another instance detected; activation signal sent");
+        return Ok(());
     }
 
     let config = Config::load().unwrap_or_else(|err| {
