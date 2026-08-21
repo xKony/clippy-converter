@@ -4,7 +4,9 @@ use crate::db::Db;
 use crate::format::{format_copy, format_display};
 use crate::history::HistoryItem;
 use crate::hotkey;
-use crate::models::{Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo};
+use crate::models::{
+    self, Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo,
+};
 use crate::placement;
 use crate::workers::{ConfigWatchTx, RatesStatus};
 use anyhow::{Context, Result};
@@ -191,7 +193,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let clipboard = ClipboardManager::new().context("Failed to initialize clipboard")?;
     let hotkey_manager =
         GlobalHotKeyManager::new().context("Failed to initialize hotkey manager")?;
-    let hk = hotkey::parse_hotkey(&config.hotkey).context("Failed to parse hotkey")?;
+    let hk = hotkey::parse_hotkey_or_default(&config.hotkey);
     if let Err(err) = hotkey_manager.register(hk) {
         warn!(error = %err, "failed to register global hotkey");
     }
@@ -426,6 +428,45 @@ impl AppState {
         format_display(value, precision, self.config.thousand_separator)
     }
 
+    /// Drains pending tray/hotkey/activation events and applies the
+    /// corresponding mode transitions on the single OS window.
+    fn handle_events(&mut self, ctx: &egui::Context) {
+        while let Ok(msg) = self.event_rx.try_recv() {
+            match msg {
+                EventMsg::Exit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                EventMsg::OpenSettings => {
+                    self.settings_window_open = true;
+                    apply_settings_viewport(ctx);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                EventMsg::HotkeyTriggered => {
+                    // There is only one OS window; if it is currently shaped
+                    // as Settings, hand it back to the converter first so the
+                    // popup appears at the cursor instead of inside the
+                    // settings-shaped window. Settings widget state (interval
+                    // strings, favorites edits, ...) lives on `AppState`
+                    // fields and survives; the user can reopen Settings from
+                    // the tray after the popup dismisses.
+                    if self.settings_window_open {
+                        self.dismiss_settings_for_popup(ctx);
+                    }
+                    self.reset_converter_popup_state();
+                    if self.config.read_selection_on_hotkey {
+                        self.hotkey_waiting_capture = true;
+                        self.capture_pending = true;
+                        let _ = self.capture_req_tx.send(());
+                    } else {
+                        self.request_recent_history();
+                        self.show_converter_window(ctx);
+                    }
+                }
+            }
+        }
+    }
+
     fn run_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         // eframe calls `window.set_visible(true)` right after the first painted
         // frame regardless of `with_visible(false)`, which used to leave a black
@@ -445,30 +486,7 @@ impl AppState {
             self.last_seen_rates_version = rates_v;
         }
 
-        while let Ok(msg) = self.event_rx.try_recv() {
-            match msg {
-                EventMsg::Exit => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                EventMsg::OpenSettings => {
-                    self.settings_window_open = true;
-                    apply_settings_viewport(ctx);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                EventMsg::HotkeyTriggered => {
-                    self.reset_converter_popup_state();
-                    if self.config.read_selection_on_hotkey {
-                        self.hotkey_waiting_capture = true;
-                        self.capture_pending = true;
-                        let _ = self.capture_req_tx.send(());
-                    } else {
-                        self.request_recent_history();
-                        self.show_converter_window(ctx);
-                    }
-                }
-            }
-        }
+        self.handle_events(ctx);
 
         if let Ok(capture_result) = self.capture_res_rx.try_recv() {
             let waiting_show = self.hotkey_waiting_capture;
@@ -588,9 +606,8 @@ impl AppState {
             return;
         };
         self.config.hotkey = recorded;
-        if let Ok(hk) = hotkey::parse_hotkey(&self.config.hotkey)
-            && hk != self.hotkey_id
-        {
+        let hk = hotkey::parse_hotkey_or_default(&self.config.hotkey);
+        if hk != self.hotkey_id {
             if let Err(err) = self.hotkey_manager.unregister(self.hotkey_id) {
                 warn!(error = %err, "failed to unregister previous hotkey");
             }
@@ -605,10 +622,18 @@ impl AppState {
 
     fn apply_interval_fields(&mut self) {
         if let Ok(mins) = self.config_fiat_interval_str.parse::<u64>() {
-            self.config.fiat_update_interval_mins = mins.max(1);
+            self.config.fiat_update_interval_mins = models::sanitize_interval_mins(
+                "fiat_update_interval_mins",
+                mins,
+                models::DEFAULT_FIAT_INTERVAL_MINS,
+            );
         }
         if let Ok(mins) = self.config_crypto_interval_str.parse::<u64>() {
-            self.config.crypto_update_interval_mins = mins.max(1);
+            self.config.crypto_update_interval_mins = models::sanitize_interval_mins(
+                "crypto_update_interval_mins",
+                mins,
+                models::DEFAULT_CRYPTO_INTERVAL_MINS,
+            );
         }
     }
 
@@ -709,6 +734,17 @@ impl AppState {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
+    }
+
+    /// Switches the single OS window out of settings mode so a converter
+    /// popup can take over. Only the mode flag and viewport styling change;
+    /// settings widget state is intentionally preserved. The window is hidden
+    /// until [`Self::show_converter_window`] re-shows it at the cursor
+    /// (immediately, or once a pending clipboard capture completes).
+    fn dismiss_settings_for_popup(&mut self, ctx: &egui::Context) {
+        self.settings_window_open = false;
+        apply_converter_viewport(ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
     /// Shows the converter popup at the cursor (clipboard capture is optional and separate).
