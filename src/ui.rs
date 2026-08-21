@@ -1,9 +1,9 @@
 use crate::clipboard::ClipboardManager;
 use crate::converter::Converter;
 use crate::db::Db;
+use crate::format::{format_copy, format_display};
 use crate::history::HistoryItem;
 use crate::hotkey;
-use crate::format::{format_copy, format_display};
 use crate::models::{Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo};
 use crate::placement;
 use crate::workers::{ConfigWatchTx, RatesStatus};
@@ -158,7 +158,9 @@ fn apply_converter_viewport(ctx: &egui::Context) {
 fn apply_settings_viewport(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
-    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+        egui::WindowLevel::Normal,
+    ));
     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SETTINGS_INNER_SIZE));
     ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(SETTINGS_MIN_INNER_SIZE));
     ctx.send_viewport_cmd(egui::ViewportCommand::Title(
@@ -245,8 +247,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     }
 
     // Channel for sending history log entries to the background runtime
-    let (history_tx, mut history_rx) =
-        tokio::sync::mpsc::channel::<HistoryLogEntry>(64);
+    let (history_tx, mut history_rx) = tokio::sync::mpsc::channel::<HistoryLogEntry>(64);
 
     let retention_days_startup = config.history_retention.to_days();
 
@@ -675,7 +676,10 @@ impl AppState {
             return false;
         }
         if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.list_cursor = self.list_cursor.saturating_add(1).min(len.saturating_sub(1));
+            self.list_cursor = self
+                .list_cursor
+                .saturating_add(1)
+                .min(len.saturating_sub(1));
         }
         if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             self.list_cursor = self.list_cursor.saturating_sub(1);
@@ -759,11 +763,10 @@ impl AppState {
             return;
         };
 
-        if let Ok(result) = self.converter.convert_preferring(
-            parsed.value,
-            &unit,
-            parsed.target.as_deref(),
-        ) {
+        if let Ok(result) =
+            self.converter
+                .convert_preferring(parsed.value, &unit, parsed.target.as_deref())
+        {
             self.current_result = Some(result);
             self.current_mode = WindowMode::Results;
             self.log_conversion_if_enabled();
@@ -832,21 +835,16 @@ impl AppState {
             self.persist_config();
         }
         ui.label(
-            egui::RichText::new(
-                "On by default. Unchecked: hotkey opens an empty popup.",
-            )
-            .small()
-            .color(ui.visuals().weak_text_color()),
+            egui::RichText::new("On by default. Unchecked: hotkey opens an empty popup.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(2.0);
 
         #[cfg(windows)]
         {
             if ui
-                .checkbox(
-                    &mut self.config.start_with_windows,
-                    "Start with Windows",
-                )
+                .checkbox(&mut self.config.start_with_windows, "Start with Windows")
                 .changed()
             {
                 self.persist_config();
@@ -925,16 +923,11 @@ impl AppState {
 
         ui.label("Unit packs");
         ui.label(
-            egui::RichText::new(
-                "Length, weight, temperature, time, and currency are always on.",
-            )
-            .small()
-            .color(ui.visuals().weak_text_color()),
+            egui::RichText::new("Length, weight, temperature, time, and currency are always on.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
         );
-        let volume = ui.checkbox(
-            &mut self.config.unit_packs.volume,
-            "Volume (L, gal, fl oz)",
-        );
+        let volume = ui.checkbox(&mut self.config.unit_packs.volume, "Volume (L, gal, fl oz)");
         let area = ui.checkbox(&mut self.config.unit_packs.area, "Area (m², acre, ha)");
         let speed = ui.checkbox(&mut self.config.unit_packs.speed, "Speed (km/h, mph, kn)");
         let data = ui.checkbox(&mut self.config.unit_packs.data, "Data (KB, MiB, GB)");
@@ -1081,13 +1074,12 @@ impl AppState {
 
         if self.current_mode == WindowMode::ValueInput {
             ui.horizontal(|ui| {
-                let response = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.manual_input_value)
-                            .hint_text("100 USD to PLN")
-                            .font(egui::TextStyle::Heading)
-                            .desired_width(f32::INFINITY),
-                    );
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.manual_input_value)
+                        .hint_text("100 USD to PLN")
+                        .font(egui::TextStyle::Heading)
+                        .desired_width(f32::INFINITY),
+                );
                 if self.focus_main_input {
                     response.request_focus();
                     self.focus_main_input = false;
@@ -1131,15 +1123,15 @@ impl AppState {
                 }
 
                 let enter = self.step_list_cursor(ui, self.unit_filter_results.len());
-                if enter
-                    && let Some(unit) = self.unit_filter_results.get(self.list_cursor)
-                {
+                if enter && let Some(unit) = self.unit_filter_results.get(self.list_cursor) {
                     let symbol = unit.symbol.clone();
                     self.apply_source_symbol(&symbol);
                 }
 
                 let mut clicked_symbol: Option<String> = None;
-                let highlight = ui.visuals().selection.bg_fill;
+                // A muted blend instead of the raw selection blue keeps the
+                // row text readable and avoids a harsh full-width bar.
+                let highlight = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
                 let cursor = self.list_cursor;
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
@@ -1160,8 +1152,7 @@ impl AppState {
                                 } else {
                                     egui::Color32::TRANSPARENT
                                 };
-                                if ui.add(egui::Button::new(button_text).fill(fill)).clicked()
-                                {
+                                if ui.add(egui::Button::new(button_text).fill(fill)).clicked() {
                                     clicked_symbol = Some(unit.symbol.clone());
                                 }
                             }
@@ -1185,14 +1176,14 @@ impl AppState {
                 };
 
                 let enter = self.step_list_cursor(ui, outputs.len());
-                if enter
-                    && let Some(output) = outputs.get(self.list_cursor)
-                {
+                if enter && let Some(output) = outputs.get(self.list_cursor) {
                     self.copy_value_to_clipboard(ctx, output.value, true);
                 }
 
                 if !outputs.is_empty() {
-                    let highlight = ui.visuals().selection.bg_fill;
+                    // A muted blend instead of the raw selection blue keeps the
+                    // row text readable and avoids a harsh full-width bar.
+                    let highlight = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
                     let cursor = self.list_cursor;
                     egui::ScrollArea::vertical()
                         .max_height(300.0)
@@ -1219,89 +1210,105 @@ impl AppState {
                                     } else {
                                         egui::Color32::TRANSPARENT
                                     };
-                                    egui::Frame::new().fill(fill).show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(self.fmt_num(output.value, 4))
-                                                    .strong()
-                                                    .size(18.0),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(&output.unit)
-                                                    .size(14.0)
-                                                    .color(ui.visuals().weak_text_color()),
-                                            );
-                                        });
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .add(egui::Button::image(
-                                                        egui::Image::new(favorite_icon).tint(tint),
-                                                    ))
-                                                    .clicked()
-                                                {
-                                                    if let Some(pos) = self
-                                                        .config
-                                                        .favorites
-                                                        .iter()
-                                                        .position(|f| f == &output.unit)
-                                                    {
-                                                        self.config.favorites.remove(pos);
-                                                    } else {
-                                                        self.config
-                                                            .favorites
-                                                            .push(output.unit.clone());
-                                                    }
-                                                    let _ = self.config.save();
-                                                    // Update sorting config without
-                                                    // discarding the units cache.
-                                                    self.converter
-                                                        .set_config(self.config.clone());
-                                                    self.unit_filter_query = None;
-                                                }
-
-                                                if ui
-                                                    .add(egui::Button::image(
-                                                        egui::Image::new(egui::include_image!(
-                                                            "../icons/switch.svg"
-                                                        ))
-                                                        .tint(ui.visuals().text_color()),
-                                                    ))
-                                                    .clicked()
-                                                    && let Ok(new_res) = self
-                                                        .converter
-                                                        .convert(output.value, &output.unit)
-                                                {
-                                                    self.current_result = Some(new_res);
-                                                    self.captured_value = output.value;
-                                                    self.search_query.clear();
-                                                    self.search_query_lower.clear();
-                                                    self.log_conversion_if_enabled();
-                                                    self.focus_main_input = true;
-                                                }
-
-                                                if ui
-                                                    .add(egui::Button::image(
-                                                        egui::Image::new(egui::include_image!(
-                                                            "../icons/copy.svg"
-                                                        ))
-                                                        .tint(ui.visuals().text_color()),
-                                                    ))
-                                                    .clicked()
-                                                {
-                                                    self.copy_value_to_clipboard(
-                                                        ctx,
-                                                        output.value,
-                                                        false,
+                                    // The margin is applied to every row (not just
+                                    // the highlighted one) so rows do not shift
+                                    // when the keyboard cursor moves.
+                                    egui::Frame::new()
+                                        .fill(fill)
+                                        .corner_radius(4.0)
+                                        .inner_margin(egui::Margin::symmetric(6, 4))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            self.fmt_num(output.value, 4),
+                                                        )
+                                                        .strong()
+                                                        .size(18.0),
                                                     );
-                                                }
-                                            },
-                                        );
-                                    });
-                                    });
+                                                    ui.label(
+                                                        egui::RichText::new(&output.unit)
+                                                            .size(14.0)
+                                                            .color(ui.visuals().weak_text_color()),
+                                                    );
+                                                });
+
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if ui
+                                                            .add(egui::Button::image(
+                                                                egui::Image::new(favorite_icon)
+                                                                    .tint(tint),
+                                                            ))
+                                                            .clicked()
+                                                        {
+                                                            if let Some(pos) = self
+                                                                .config
+                                                                .favorites
+                                                                .iter()
+                                                                .position(|f| f == &output.unit)
+                                                            {
+                                                                self.config.favorites.remove(pos);
+                                                            } else {
+                                                                self.config
+                                                                    .favorites
+                                                                    .push(output.unit.clone());
+                                                            }
+                                                            let _ = self.config.save();
+                                                            // Update sorting config without
+                                                            // discarding the units cache.
+                                                            self.converter
+                                                                .set_config(self.config.clone());
+                                                            self.unit_filter_query = None;
+                                                        }
+
+                                                        if ui
+                                                            .add(egui::Button::image(
+                                                                egui::Image::new(
+                                                                    egui::include_image!(
+                                                                        "../icons/switch.svg"
+                                                                    ),
+                                                                )
+                                                                .tint(ui.visuals().text_color()),
+                                                            ))
+                                                            .clicked()
+                                                            && let Ok(new_res) = self
+                                                                .converter
+                                                                .convert(output.value, &output.unit)
+                                                        {
+                                                            self.current_result = Some(new_res);
+                                                            self.captured_value = output.value;
+                                                            self.search_query.clear();
+                                                            self.search_query_lower.clear();
+                                                            self.log_conversion_if_enabled();
+                                                            self.focus_main_input = true;
+                                                        }
+
+                                                        if ui
+                                                            .add(egui::Button::image(
+                                                                egui::Image::new(
+                                                                    egui::include_image!(
+                                                                        "../icons/copy.svg"
+                                                                    ),
+                                                                )
+                                                                .tint(ui.visuals().text_color()),
+                                                            ))
+                                                            .clicked()
+                                                        {
+                                                            self.copy_value_to_clipboard(
+                                                                ctx,
+                                                                output.value,
+                                                                false,
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                        });
                                     ui.separator();
                                 }
                             });
@@ -1430,11 +1437,7 @@ impl AppState {
     }
 
     fn history_output_text(item: &HistoryItem) -> String {
-        format!(
-            "{} {}",
-            format_copy(item.output_value),
-            item.output_unit
-        )
+        format!("{} {}", format_copy(item.output_value), item.output_unit)
     }
 
     fn reopen_history_item(&mut self, item: &HistoryItem) {
@@ -1450,9 +1453,7 @@ impl AppState {
 
     fn sort_units_favorites_first(units: &mut [UnitInfo], favorites: &[String]) {
         let ranks = crate::models::favorite_ranks(favorites);
-        units.sort_by(|a, b| {
-            crate::models::cmp_favorite_rank(&a.symbol, &b.symbol, &ranks)
-        });
+        units.sort_by(|a, b| crate::models::cmp_favorite_rank(&a.symbol, &b.symbol, &ranks));
     }
 }
 
