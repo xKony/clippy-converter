@@ -39,6 +39,30 @@ const FIAT_STALE_SECS: i64 = 48 * 3600;
 /// Crypto older than this is shown as stale (hourly refresh).
 const CRYPTO_STALE_SECS: i64 = 6 * 3600;
 
+/// Hard cap for the cached USDT/EUR factor age: even with a very long refresh
+/// interval, never scale fresh Binance prices by fiat data older than a day.
+const USDT_FACTOR_MAX_TTL_SECS: i64 = 24 * 3600;
+
+/// TTL for the cached USDT/EUR factor: twice the configured crypto refresh interval,
+/// capped at [`USDT_FACTOR_MAX_TTL_SECS`].
+#[must_use]
+fn usdt_factor_ttl_secs(crypto_interval_mins: u64) -> i64 {
+    let secs = crypto_interval_mins
+        .max(1)
+        .saturating_mul(2)
+        .saturating_mul(60);
+    i64::try_from(secs)
+        .unwrap_or(USDT_FACTOR_MAX_TTL_SECS)
+        .min(USDT_FACTOR_MAX_TTL_SECS)
+}
+
+/// True when the cached USDT/EUR factor row is recent enough to scale fresh crypto
+/// prices. A zero/absent timestamp is treated as unknown and refused.
+#[must_use]
+const fn usdt_factor_is_fresh(factor_timestamp: i64, now_unix: i64, ttl_secs: i64) -> bool {
+    factor_timestamp > 0 && now_unix.saturating_sub(factor_timestamp) <= ttl_secs
+}
+
 impl RatesStatus {
     /// Creates a shared status object starting with no known refresh times.
     #[must_use]
@@ -187,7 +211,8 @@ pub async fn start_fiat_worker(db: Db, mut config_rx: ConfigWatchRx, rates: Rate
 /// interval takes effect without waiting out the previous sleep (without forcing an extra fetch).
 pub async fn start_crypto_worker(db: Db, mut config_rx: ConfigWatchRx, rates: RatesStatus) {
     loop {
-        if let Err(err) = update_crypto_rates(&db, &rates).await {
+        let config = config_rx.borrow().clone();
+        if let Err(err) = update_crypto_rates(&db, &rates, &config).await {
             error!(error = %err, "crypto rate refresh failed");
         }
         if !wait_for_interval(&mut config_rx, |c| c.crypto_update_interval_mins).await {
@@ -245,7 +270,7 @@ async fn update_fiat_rates(db: &Db, rates: &RatesStatus) -> Result<()> {
     Ok(())
 }
 
-async fn update_crypto_rates(db: &Db, rates: &RatesStatus) -> Result<()> {
+async fn update_crypto_rates(db: &Db, rates: &RatesStatus, config: &Config) -> Result<()> {
     let db_for_usdt = db.clone();
     let usdt_factor = tokio::task::spawn_blocking(move || db_for_usdt.get_unit("USDT"))
         .await
@@ -255,6 +280,20 @@ async fn update_crypto_rates(db: &Db, rates: &RatesStatus) -> Result<()> {
         warn!("USDT rate missing; skipping crypto refresh until fiat lands");
         return Ok(());
     };
+
+    // Fresh Binance prices must not be scaled by an ancient USDT/EUR factor: if the
+    // fiat-sourced factor row is past its TTL, skip this cycle instead of writing
+    // stale-scaled rates.
+    let now_unix = Utc::now().timestamp();
+    let ttl_secs = usdt_factor_ttl_secs(config.crypto_update_interval_mins);
+    if !usdt_factor_is_fresh(usdt_entry.timestamp, now_unix, ttl_secs) {
+        warn!(
+            age_secs = now_unix.saturating_sub(usdt_entry.timestamp),
+            ttl_secs,
+            "cached USDT/EUR factor is stale; skipping crypto refresh"
+        );
+        return Ok(());
+    }
 
     let tickers = match fetch_binance_tickers().await {
         Ok(tickers) => tickers,
@@ -361,5 +400,31 @@ mod tests {
             last_crypto_failed: false,
         };
         assert!(snap.is_stale(1060));
+    }
+
+    #[test]
+    fn usdt_factor_ttl_is_twice_interval_capped_at_one_day() {
+        assert_eq!(usdt_factor_ttl_secs(30), 3600);
+        assert_eq!(usdt_factor_ttl_secs(0), 120);
+        // 10 h interval -> 20 h TTL, still under the cap.
+        assert_eq!(usdt_factor_ttl_secs(600), 72_000);
+        // 24 h interval would give 48 h, but the 24 h cap applies.
+        assert_eq!(usdt_factor_ttl_secs(1_440), USDT_FACTOR_MAX_TTL_SECS);
+        assert_eq!(
+            usdt_factor_ttl_secs(u64::MAX),
+            USDT_FACTOR_MAX_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn usdt_factor_freshness_gates_scaling() {
+        let ttl = 7_200_i64;
+        assert!(usdt_factor_is_fresh(1000, 1000 + ttl, ttl));
+        assert!(!usdt_factor_is_fresh(1000, 1000 + ttl + 1, ttl));
+        // Unknown/absent timestamps are refused.
+        assert!(!usdt_factor_is_fresh(0, 1000, ttl));
+        assert!(!usdt_factor_is_fresh(-5, 1000, ttl));
+        // Clock skew (future timestamp) is tolerated.
+        assert!(usdt_factor_is_fresh(1000, 500, ttl));
     }
 }

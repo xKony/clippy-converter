@@ -15,6 +15,47 @@ const ALIASES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("aliases
 /// Key/value metadata (seed version, etc.).
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
+/// How much newer a candidate rate row must be than the cached one to overcome a
+/// source-priority disadvantage (and how stale a higher-priority row may be before a
+/// fresher lower-priority row wins). Keeps e.g. a live fiat feed from being blocked
+/// forever by an abandoned crypto row.
+const SOURCE_PRIORITY_GRACE_SECS: i64 = 24 * 3600;
+
+/// Staleness-aware rule for whether an incoming rate row replaces the cached entry.
+///
+/// - Corrupt entries are always replaced.
+/// - Static seed rows are only rewritten by reseeding, never by rate batches.
+/// - Same source: strictly newer timestamp wins.
+/// - Different sources: priority wins only while the cached row is not meaningfully
+///   staler than the candidate; beyond [`SOURCE_PRIORITY_GRACE_SECS`] freshness wins.
+#[must_use]
+fn should_accept_candidate(
+    existing: &UnitEntry,
+    candidate_source: u8,
+    candidate_timestamp: i64,
+) -> bool {
+    if existing.is_corrupt() {
+        return true;
+    }
+    if existing.source == RateSource::Static as u8 {
+        return false;
+    }
+    match candidate_source.cmp(&existing.source) {
+        std::cmp::Ordering::Equal => candidate_timestamp > existing.timestamp,
+        std::cmp::Ordering::Greater => {
+            // Higher priority wins unless the candidate is itself far staler than
+            // the cache (e.g. a replayed old crypto batch over fresh fiat data).
+            candidate_timestamp
+                >= existing.timestamp.saturating_sub(SOURCE_PRIORITY_GRACE_SECS)
+        }
+        std::cmp::Ordering::Less => {
+            // Lower priority only wins when it is significantly newer than the cache.
+            candidate_timestamp
+                > existing.timestamp.saturating_add(SOURCE_PRIORITY_GRACE_SECS)
+        }
+    }
+}
+
 /// Bump when [`STATIC_UNITS`] gains rows, factor fixes, or new aliases so existing
 /// databases rewrite static entries. `add_unit_static` used to skip symbols that
 /// already existed, which left upgrades invisible.
@@ -153,9 +194,10 @@ impl Db {
     }
 
     /// Updates many rates in a single write transaction, applying the same priority rules as
-    /// [`Db::update_rate`] (a higher-priority source, e.g. Crypto over Fiat, always wins; ties
-    /// on source are broken by the newer timestamp). All entries share the same `timestamp` and
-    /// `source`, matching a single batch API refresh.
+    /// [`Db::update_rate`] (a higher-priority source, e.g. Crypto over Fiat, wins unless it is
+    /// itself far staler than the cached row; ties on source are broken by the newer
+    /// timestamp). All entries share the same `timestamp` and `source`, matching a single
+    /// batch API refresh.
     ///
     /// Intended for workers refreshing many symbols at once (e.g. all fiat or all crypto rates)
     /// so that only one write transaction and one table handle are used for the whole batch.
@@ -196,10 +238,7 @@ impl Db {
                     .context("Failed to read existing unit")?
                     .is_none_or(|existing| {
                         let existing_val: UnitEntry = existing.value();
-                        existing_val.is_corrupt()
-                            || (source as u8 > existing_val.source)
-                            || (source as u8 == existing_val.source
-                                && timestamp > existing_val.timestamp)
+                        should_accept_candidate(&existing_val, source as u8, timestamp)
                     });
 
                 if should_update {
@@ -1220,6 +1259,122 @@ mod tests {
         let all = db.get_all_units_with_aliases().unwrap();
         assert!(all.contains_key("USD"));
         assert!(!all.contains_key("BAD"));
+    }
+
+    #[test]
+    fn should_accept_candidate_replaces_missing_or_corrupt_rows() {
+        assert!(should_accept_candidate(
+            &UnitEntry::corrupt_sentinel(),
+            RateSource::Fiat as u8,
+            0
+        ));
+    }
+
+    #[test]
+    fn should_accept_candidate_never_overwrites_static_seed() {
+        let static_row = UnitEntry {
+            factor: 1000.0,
+            offset: 0.0,
+            category: UnitCategory::Length as u8,
+            timestamp: 0,
+            source: RateSource::Static as u8,
+        };
+        assert!(!should_accept_candidate(
+            &static_row,
+            RateSource::Crypto as u8,
+            i64::MAX
+        ));
+    }
+
+    #[test]
+    fn should_accept_candidate_ties_broken_by_newer_timestamp() {
+        let fiat = UnitEntry {
+            factor: 0.25,
+            offset: 0.0,
+            category: UnitCategory::Currency as u8,
+            timestamp: 1000,
+            source: RateSource::Fiat as u8,
+        };
+        assert!(should_accept_candidate(&fiat, RateSource::Fiat as u8, 1001));
+        assert!(!should_accept_candidate(&fiat, RateSource::Fiat as u8, 1000));
+        assert!(!should_accept_candidate(&fiat, RateSource::Fiat as u8, 999));
+    }
+
+    #[test]
+    fn should_accept_candidate_higher_priority_loses_when_far_staler() {
+        // Fresh fiat cache at T; a crypto candidate more than GRACE staler must lose.
+        let fiat_now = UnitEntry {
+            factor: 0.25,
+            offset: 0.0,
+            category: UnitCategory::Currency as u8,
+            timestamp: 100_000,
+            source: RateSource::Fiat as u8,
+        };
+        assert!(!should_accept_candidate(
+            &fiat_now,
+            RateSource::Crypto as u8,
+            100_000 - SOURCE_PRIORITY_GRACE_SECS - 1
+        ));
+        // Within the grace window (or newer), higher priority wins as before.
+        assert!(should_accept_candidate(
+            &fiat_now,
+            RateSource::Crypto as u8,
+            100_000 - SOURCE_PRIORITY_GRACE_SECS + 1
+        ));
+        assert!(should_accept_candidate(&fiat_now, RateSource::Crypto as u8, 200_000));
+    }
+
+    #[test]
+    fn should_accept_candidate_lower_priority_wins_only_when_significantly_newer() {
+        // Stale crypto cache that has not refreshed in days.
+        let stale_crypto = UnitEntry {
+            factor: 50_000.0,
+            offset: 0.0,
+            category: UnitCategory::Currency as u8,
+            timestamp: 1000,
+            source: RateSource::Crypto as u8,
+        };
+        // Slightly newer fiat does NOT beat the higher-priority crypto row...
+        assert!(!should_accept_candidate(
+            &stale_crypto,
+            RateSource::Fiat as u8,
+            1000 + SOURCE_PRIORITY_GRACE_SECS - 1
+        ));
+        // ...but a fiat row beyond the grace window finally wins.
+        assert!(should_accept_candidate(
+            &stale_crypto,
+            RateSource::Fiat as u8,
+            1000 + SOURCE_PRIORITY_GRACE_SECS + 1
+        ));
+    }
+
+    #[test]
+    fn batch_newer_fiat_beats_stale_crypto_after_grace_window() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        // Crypto stopped refreshing after ts 10_000.
+        db.update_rate("BTC", 50_000.0, 10_000, RateSource::Crypto)
+            .unwrap();
+
+        // Next daily fiat refresh is still inside the grace window: skipped.
+        let updated = db
+            .update_rates_batch([("BTC".to_string(), 49_000.0)], 10_000 + 3600, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 0);
+        let btc = db.get_unit("BTC").unwrap().unwrap();
+        assert_eq!(btc.source, RateSource::Crypto as u8);
+
+        // Once the crypto row is older than the grace window, fiat wins.
+        let updated = db
+            .update_rate("BTC", 48_000.0, 10_000 + SOURCE_PRIORITY_GRACE_SECS + 1, RateSource::Fiat);
+        assert!(updated.is_ok());
+        let btc = db.get_unit("BTC").unwrap().unwrap();
+        assert_eq!(btc.source, RateSource::Fiat as u8);
+        assert!((btc.factor - (1.0 / 48_000.0)).abs() < f64::EPSILON);
     }
 
     #[test]
