@@ -15,7 +15,8 @@
   - `anyhow`: 1.0
   - `eframe`: 0.34.1 (features: ["glow"])
   - `egui`: 0.34.1
-  - `egui_extras`: 0.34.1 (features: ["svg", "image"])
+  - `egui_extras`: 0.34.1 (features: ["svg"])
+  - `image`: 0.25 (features: ["ico", "png"]; already transitive via arboard/eframe)
   - `global-hotkey`: 0.7.0
   - `arboard`: 3.4
   - `enigo`: 0.6.1
@@ -52,7 +53,7 @@
 - `src/theme.rs`: egui dark theme and spacing.
 - `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring. Settings checkboxes persist immediately; interval/hotkey changes still have a Save & Apply path. Popup shows cached rate age.
 - `src/workers.rs`: Async Tokio tasks for periodic rate refreshes (`spawn_blocking` for redb I/O, `watch` for config). `RatesStatus` tracks last success/failure for the popup.
-- `icons/`: SVG assets for the popup (close, copy, favorite, switch). Tray uses a generated 32×32 RGBA icon (blue disk with a C).
+- `icons/`: SVG assets for the popup (close, copy, favorite, switch). Tray uses the bundled `clippy-converter_icon.ico`, decoded at compile time and Lanczos-downscaled to 32×32 in `ui.rs::make_tray_icon`.
 - `Cargo.toml`: Project dependencies, metadata, and strict linting rules.
 
 ## 4. Architecture and patterns

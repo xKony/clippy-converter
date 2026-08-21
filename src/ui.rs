@@ -113,37 +113,21 @@ const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(2);
 /// How many recent conversions to show in the popup.
 const RECENT_HISTORY_LIMIT: usize = 10;
 
+/// Rasterizes the bundled app icon (`icons/clippy-converter_icon.ico`) down to
+/// tray size, replacing the old procedurally drawn placeholder.
 fn make_tray_icon() -> Result<tray_icon::Icon> {
     const SIZE: u32 = 32;
-    let mut rgba = vec![0_u8; SIZE as usize * SIZE as usize * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let Ok(x_i) = i32::try_from(x) else {
-                continue;
-            };
-            let Ok(y_i) = i32::try_from(y) else {
-                continue;
-            };
-            let dx = x_i - 16;
-            let dy = y_i - 16;
-            let dist2 = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
-            let on_ring = (49..=169).contains(&dist2);
-            let in_gap = dx > 2 && dy.unsigned_abs() < 6_u32 && dist2 < 169;
-            let i = ((y * SIZE + x) * 4) as usize;
-            if on_ring && !in_gap {
-                rgba[i] = 255;
-                rgba[i + 1] = 255;
-                rgba[i + 2] = 255;
-                rgba[i + 3] = 255;
-            } else if dist2 <= 225 {
-                rgba[i] = 70;
-                rgba[i + 1] = 130;
-                rgba[i + 2] = 230;
-                rgba[i + 3] = 255;
-            }
-        }
-    }
-    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).context("Failed to build tray icon")
+    let ico = image::load_from_memory_with_format(
+        include_bytes!("../icons/clippy-converter_icon.ico"),
+        image::ImageFormat::Ico,
+    )
+    .context("Failed to decode bundled tray icon")?;
+    let rgba = ico
+        .resize_exact(SIZE, SIZE, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    tray_icon::Icon::from_rgba(rgba.into_raw(), width, height)
+        .context("Failed to build tray icon")
 }
 
 fn apply_converter_viewport(ctx: &egui::Context) {

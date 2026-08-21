@@ -734,6 +734,7 @@ dependencies = [
  "egui_extras",
  "enigo",
  "global-hotkey",
+ "image",
  "open",
  "redb",
  "reqwest",
