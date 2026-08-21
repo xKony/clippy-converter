@@ -200,15 +200,19 @@ async fn prune_history_atomic(path: &Path, days: i64) -> Result<()> {
 
     while let Some(line) = reader.next_line().await? {
         // Entry format: [2024-04-23T10:00:00Z] | ...
-        if let Some(end_idx) = line.find(']') {
-            if let Ok(ts) = DateTime::parse_from_rfc3339(&line[1..end_idx]) {
-                if ts.with_timezone(&Utc) >= threshold {
-                    kept_lines.push(line);
-                }
-            } else {
-                // Keep malformed lines just in case
+        let Some(end_idx) = line.find(']') else {
+            // No timestamp delimiter at all: keep malformed lines just in case
+            // instead of silently dropping them during the rewrite.
+            kept_lines.push(line);
+            continue;
+        };
+        if let Ok(ts) = DateTime::parse_from_rfc3339(&line[1..end_idx]) {
+            if ts.with_timezone(&Utc) >= threshold {
                 kept_lines.push(line);
             }
+        } else {
+            // Keep malformed lines just in case
+            kept_lines.push(line);
         }
     }
 
@@ -320,6 +324,31 @@ mod tests {
             entry_count += 1;
         }
         assert_eq!(entry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn prune_history_atomic_keeps_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        let old = "2020-01-01T00:00:00Z";
+        let recent = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        std::fs::write(
+            &path,
+            format!(
+                "[{old}] | 1.0000 m -> 3.2808 ft\nno closing bracket at all\n[not-a-date] | 9.9999 x -> 9.9999 y\n[{recent}] | 2.0000 kg -> 4.4092 lb\n"
+            ),
+        )
+        .unwrap();
+
+        prune_history_atomic(&path, 30).await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // Only the entry with an old parsed timestamp may be dropped.
+        assert!(!contents.contains("1.0000 m"));
+        assert!(contents.contains("2.0000 kg"));
+        // Malformed lines (missing `]`, unparseable timestamp) must survive.
+        assert!(contents.contains("no closing bracket at all"));
+        assert!(contents.contains("[not-a-date] | 9.9999 x -> 9.9999 y"));
     }
 
     #[tokio::test]

@@ -52,7 +52,9 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
     }
 
     let value_raw = &core_input[..number_end];
-    let value_str = normalize_numeric(value_raw);
+    let value_str = normalize_numeric(value_raw).ok_or_else(|| {
+        anyhow!("Ambiguous numeric token with both a decimal comma and an exponent: {value_raw}")
+    })?;
     let value: f64 = value_str
         .parse()
         .map_err(|_| anyhow!("Failed to parse numeric part: {value_raw}"))?;
@@ -157,15 +159,26 @@ fn exponent_continues(after_e: &str) -> bool {
 }
 
 /// Turns grouped/locale number text into something `f64::parse` accepts.
-fn normalize_numeric(raw: &str) -> String {
+///
+/// Returns `None` for tokens that mix an exponent marker with a comma
+/// (`1,5e3`): reading the comma as grouping yields 15000 while reading it as a
+/// decimal separator yields 1500, so the caller must reject the token instead
+/// of converting a silently wrong magnitude.
+fn normalize_numeric(raw: &str) -> Option<String> {
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    // A `,` next to an exponent is never safely interpretable on its own, so
+    // refuse to guess even when it could plausibly be grouping (`1,234e5`).
+    if compact.contains(',') && (compact.contains('e') || compact.contains('E')) {
+        return None;
+    }
+
     if compact.contains('e') || compact.contains('E') {
-        return compact.replace(',', "");
+        return Some(compact);
     }
 
     let last_comma = compact.rfind(',');
     let last_dot = compact.rfind('.');
-    match (last_comma, last_dot) {
+    Some(match (last_comma, last_dot) {
         (Some(c), Some(d)) if d > c => compact.replace(',', ""),
         (Some(_), Some(_)) => compact.replace('.', "").replace(',', "."),
         (Some(_), None) => {
@@ -187,7 +200,7 @@ fn normalize_numeric(raw: &str) -> String {
             }
         }
         _ => compact,
-    }
+    })
 }
 
 fn strip_trailing_currency(unit_str: &str) -> Option<(&str, &'static str)> {
@@ -346,6 +359,43 @@ mod tests {
         let res = parse_input("100$").unwrap();
         assert_eq!(res.value, 100.0);
         assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_accept_comma_decimal_without_exponent() {
+        let res = parse_input("1,5").unwrap();
+        assert_eq!(res.value, 1.5);
+        assert_eq!(res.unit, None);
+
+        let res = parse_input("1,5 USD").unwrap();
+        assert_eq!(res.value, 1.5);
+        assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_accept_dot_decimal_with_exponent() {
+        let res = parse_input("1.5e3").unwrap();
+        assert_eq!(res.value, 1500.0);
+
+        let res = parse_input("15000").unwrap();
+        assert_eq!(res.value, 15_000.0);
+    }
+
+    #[test]
+    fn parse_should_accept_grouped_digits_with_fraction() {
+        let res = parse_input("1,234.5 USD").unwrap();
+        assert_eq!(res.value, 1234.5);
+        assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_reject_comma_combined_with_exponent() {
+        // `1,5e3` used to silently become `15e3` = 15000; ambiguity must be an
+        // error rather than a wrong conversion result.
+        assert!(parse_input("1,5e3").is_err());
+        assert!(parse_input("1,5E3 USD").is_err());
+        // Even a plausible grouping (`1,234e5`) is refused next to an exponent.
+        assert!(parse_input("1,234e5").is_err());
     }
 
     #[test]

@@ -164,7 +164,9 @@ impl Db {
     /// Returns an error if the transaction fails.
     ///
     /// Returns the number of symbols that were actually updated (i.e. that passed the priority
-    /// check), which may be less than the number of input rates.
+    /// check), which may be less than the number of input rates. Rows with a zero, negative, or
+    /// non-finite price are skipped entirely (they cannot yield a usable conversion factor) and
+    /// are not counted.
     pub fn update_rates_batch(
         &self,
         rates: impl IntoIterator<Item = (String, f64)>,
@@ -182,6 +184,13 @@ impl Db {
                 .context("Failed to open units table")?;
 
             for (symbol, price) in rates {
+                // A non-finite or non-positive price would cache a poison factor
+                // (NaN/inf itself, or 1/0 -> inf) and make every conversion routed
+                // through this symbol return garbage; drop the row instead.
+                if !price.is_finite() || price <= 0.0 {
+                    continue;
+                }
+
                 let should_update = units_table
                     .get(symbol.as_str())
                     .context("Failed to read existing unit")?
@@ -198,7 +207,7 @@ impl Db {
                     // - Fiat rates are "Units per 1 EUR" (e.g. 1.08 USD/EUR), so Factor = 1/price.
                     // - Crypto rates are already "EUR per 1 Unit" (e.g. 60000 EUR/BTC), so Factor = price.
                     let factor = if source == RateSource::Fiat {
-                        if price == 0.0 { 0.0 } else { 1.0 / price }
+                        1.0 / price
                     } else {
                         price
                     };
@@ -1016,6 +1025,60 @@ mod tests {
 
         let gbp = db.get_unit("GBP").unwrap().unwrap();
         assert!((gbp.factor - (1.0 / 0.85)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_rates_batch_should_skip_zero_price_rows() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        // A 0.0 price would cache factor 0.0 (or 1/0) and poison conversions
+        // routed through that symbol; it must not be inserted or counted.
+        let rates = [
+            ("USD".to_string(), 1.08),
+            ("ZERO".to_string(), 0.0),
+            ("PLN".to_string(), 4.0),
+        ];
+        let updated = db
+            .update_rates_batch(rates, 1000, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 2);
+
+        assert!(db.get_unit("USD").unwrap().is_some());
+        assert!(db.get_unit("PLN").unwrap().is_some());
+        assert!(
+            db.get_unit("ZERO").unwrap().is_none(),
+            "zero-price row must not be cached"
+        );
+    }
+
+    #[test]
+    fn update_rates_batch_should_skip_negative_and_nonfinite_prices() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let db_inner = Database::builder().create(tmp_file.path()).unwrap();
+        let db = Db {
+            inner: Arc::new(db_inner),
+        };
+
+        let rates = [
+            ("NEG".to_string(), -4.0),
+            ("NAN".to_string(), f64::NAN),
+            ("INF".to_string(), f64::INFINITY),
+            ("OK".to_string(), 2.5),
+        ];
+        let updated = db
+            .update_rates_batch(rates, 1000, RateSource::Fiat)
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let ok = db.get_unit("OK").unwrap().unwrap();
+        assert!((ok.factor - 0.4).abs() < f64::EPSILON);
+        assert!(db.get_unit("NEG").unwrap().is_none());
+        assert!(db.get_unit("NAN").unwrap().is_none());
+        assert!(db.get_unit("INF").unwrap().is_none());
     }
 
     #[test]
