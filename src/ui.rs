@@ -74,6 +74,8 @@ pub struct AppState {
     /// white-flash workaround), overriding `with_visible(false)`. This flag
     /// tracks the one-time re-hide issued on the first frame.
     startup_hide_done: bool,
+    /// One-shot guard so DWM rounded corners are requested only once.
+    window_corners_done: bool,
 
     pub focus_main_input: bool,
     pub main_window_was_focused: bool,
@@ -126,8 +128,7 @@ fn make_tray_icon() -> Result<tray_icon::Icon> {
         .resize_exact(SIZE, SIZE, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
     let (width, height) = rgba.dimensions();
-    tray_icon::Icon::from_rgba(rgba.into_raw(), width, height)
-        .context("Failed to build tray icon")
+    tray_icon::Icon::from_rgba(rgba.into_raw(), width, height).context("Failed to build tray icon")
 }
 
 fn apply_converter_viewport(ctx: &egui::Context) {
@@ -388,6 +389,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 main_window_pos: egui::Pos2::ZERO,
                 settings_window_open: false,
                 startup_hide_done: false,
+                window_corners_done: false,
 
                 focus_main_input: false,
                 main_window_was_focused: false,
@@ -414,7 +416,13 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 }
 
 impl eframe::App for AppState {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // One-shot: ask DWM for rounded corners while the native HWND exists.
+        // Cheap no-op on Windows 10/other platforms.
+        if !self.window_corners_done {
+            self.window_corners_done = true;
+            placement::round_window_corners(frame);
+        }
         let ctx = ui.ctx().clone();
         self.run_logic(&ctx, ui);
     }
@@ -1184,10 +1192,10 @@ impl AppState {
                 }
 
                 let mut clicked_symbol: Option<String> = None;
-                // A muted blend instead of the raw selection blue keeps the
-                // row text readable and avoids a harsh full-width bar.
-                let highlight = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
+                // Gentle neutral washes instead of the selection blue; see
+                // design-guidelines.md ("Row states").
                 let cursor = self.list_cursor;
+                let mut hovered_row: Option<usize> = None;
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .auto_shrink([false, true])
@@ -1203,16 +1211,31 @@ impl AppState {
                                 let button_text =
                                     egui::RichText::new(format!("{} {}", unit.symbol, aliases_str));
                                 let fill = if idx == cursor {
-                                    highlight
+                                    crate::theme::row_cursor_wash()
                                 } else {
                                     egui::Color32::TRANSPARENT
                                 };
-                                if ui.add(egui::Button::new(button_text).fill(fill)).clicked() {
+                                let row = ui.add(
+                                    egui::Button::new(button_text)
+                                        .fill(fill)
+                                        .corner_radius(crate::theme::ROW_CORNER_RADIUS),
+                                );
+                                // Hovering steers the single gentle highlight:
+                                // the mouse simply moves the keyboard cursor,
+                                // so there is never a second competing color.
+                                if idx != cursor && row.hovered() {
+                                    hovered_row = Some(idx);
+                                }
+                                if row.clicked() {
                                     clicked_symbol = Some(unit.symbol.clone());
                                 }
                             }
                         });
                     });
+
+                if let Some(idx) = hovered_row {
+                    self.list_cursor = idx;
+                }
 
                 if let Some(symbol) = clicked_symbol {
                     self.apply_source_symbol(&symbol);
@@ -1236,10 +1259,11 @@ impl AppState {
                 }
 
                 if !outputs.is_empty() {
-                    // A muted blend instead of the raw selection blue keeps the
-                    // row text readable and avoids a harsh full-width bar.
-                    let highlight = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
+                    // Gentle neutral washes instead of the selection blue; see
+                    // design-guidelines.md ("Row states"). Hover steers the
+                    // single highlight, exactly like the unit picker.
                     let cursor = self.list_cursor;
+                    let mut hovered_row: Option<usize> = None;
                     egui::ScrollArea::vertical()
                         .max_height(300.0)
                         .auto_shrink([false, true])
@@ -1261,16 +1285,16 @@ impl AppState {
 
                                     ui.add_space(2.0);
                                     let fill = if idx == cursor {
-                                        highlight
+                                        crate::theme::row_cursor_wash()
                                     } else {
                                         egui::Color32::TRANSPARENT
                                     };
                                     // The margin is applied to every row (not just
                                     // the highlighted one) so rows do not shift
                                     // when the keyboard cursor moves.
-                                    egui::Frame::new()
+                                    let row = egui::Frame::new()
                                         .fill(fill)
-                                        .corner_radius(4.0)
+                                        .corner_radius(crate::theme::ROW_CORNER_RADIUS)
                                         .inner_margin(egui::Margin::symmetric(6, 4))
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
@@ -1364,10 +1388,16 @@ impl AppState {
                                                 );
                                             });
                                         });
+                                    if idx != cursor && row.response.hovered() {
+                                        hovered_row = Some(idx);
+                                    }
                                     ui.separator();
                                 }
                             });
                         });
+                    if let Some(idx) = hovered_row {
+                        self.list_cursor = idx;
+                    }
                 }
             }
         }

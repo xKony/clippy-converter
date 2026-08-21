@@ -317,6 +317,52 @@ fn x11_work_area_candidates() -> Option<Vec<MonitorCandidate>> {
     (!candidates.is_empty()).then_some(candidates)
 }
 
+/// Requests rounded OS window corners (Windows 11+).
+///
+/// Borderless `WS_POPUP` windows are not auto-rounded by DWM, so the
+/// preference is set explicitly once at startup. On Windows 10 and older the
+/// attribute is ignored and the window stays square; other platforms are a
+/// no-op.
+pub fn round_window_corners(frame: &eframe::Frame) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{
+            DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DwmSetWindowAttribute,
+        };
+
+        let Ok(handle) = frame.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return;
+        };
+
+        let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+        let preference = DWMWCP_ROUND;
+        // SAFETY: `DwmSetWindowAttribute` only reads from the pointer for the
+        // given attribute size; the call is a per-window style hint with no
+        // lifetime or aliasing requirements beyond the immediate call.
+        let result = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                std::ptr::from_ref(&preference).cast(),
+                u32::try_from(size_of::<DWM_WINDOW_CORNER_PREFERENCE>()).unwrap_or_default(),
+            )
+        };
+        if result.is_err() {
+            tracing::debug!(?result, "DWM rounded-corner preference not applied");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = frame;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]

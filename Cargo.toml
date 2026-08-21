@@ -34,6 +34,8 @@ single-instance = "0.3.3"
 eframe = { version = "0.34.1", features = ["glow"] }
 egui = "0.34.1"
 egui_extras = { version = "0.34.1", features = ["svg"] }
+# Reads the native HWND so placement.rs can request DWM-rounded corners.
+raw-window-handle = "0.6"
 # Decodes icons/clippy-converter_icon.ico for the tray; already in the tree
 # via arboard/eframe, so this adds no new compiled code.
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }
@@ -43,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Registry",

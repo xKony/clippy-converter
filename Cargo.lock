@@ -736,6 +736,7 @@ dependencies = [
  "global-hotkey",
  "image",
  "open",
+ "raw-window-handle",
  "redb",
  "reqwest",
  "serde",

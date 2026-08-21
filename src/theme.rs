@@ -1,5 +1,20 @@
 use eframe::egui;
 
+/// Gentle neutral wash behind the highlighted row (the keyboard cursor).
+///
+/// Hovering with the mouse steers the cursor instead of painting a second
+/// state, so there is only ever one wash on screen - see
+/// design-guidelines.md ("Row states"). White at low alpha composes over any
+/// dark fill into a quiet gray lift - deliberately far quieter than the
+/// selection accent.
+#[must_use]
+pub fn row_cursor_wash() -> egui::Color32 {
+    egui::Color32::from_white_alpha(20)
+}
+
+/// Corner radius used for interactive list rows (matches widget radius).
+pub const ROW_CORNER_RADIUS: u8 = 6;
+
 /// Applies a modern dark theme to the egui context.
 pub fn apply_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
