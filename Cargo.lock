@@ -727,6 +727,7 @@ dependencies = [
  "arboard",
  "bincode",
  "chrono",
+ "core-graphics 0.25.0",
  "directories",
  "eframe",
  "egui",
@@ -745,6 +746,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "windows 0.58.0",
+ "x11rb",
 ]
 
 [[package]]
