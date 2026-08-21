@@ -129,7 +129,9 @@ pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
 fn filter_usdt_tickers(tickers: Vec<BinanceTicker>) -> Vec<BinanceTicker> {
     tickers
         .into_iter()
-        .filter(|ticker| ticker.symbol.ends_with(USDT_SUFFIX) && !is_noise_usdt_pair(&ticker.symbol))
+        .filter(|ticker| {
+            ticker.symbol.ends_with(USDT_SUFFIX) && !is_noise_usdt_pair(&ticker.symbol)
+        })
         .collect()
 }
 

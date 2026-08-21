@@ -71,10 +71,7 @@ mod tests {
 
     #[test]
     fn display_no_separator() {
-        assert_eq!(
-            format_display(1234.5, 1, ThousandSeparator::None),
-            "1234.5"
-        );
+        assert_eq!(format_display(1234.5, 1, ThousandSeparator::None), "1234.5");
     }
 
     #[test]

@@ -89,7 +89,9 @@ impl RatesStatus {
 
     fn record_crypto_success(&self, unix: i64) {
         self.inner.last_crypto_unix.store(unix, Ordering::Relaxed);
-        self.inner.last_crypto_failed.store(false, Ordering::Relaxed);
+        self.inner
+            .last_crypto_failed
+            .store(false, Ordering::Relaxed);
         self.inner.version.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -197,7 +199,10 @@ pub async fn start_crypto_worker(db: Db, mut config_rx: ConfigWatchRx, rates: Ra
 /// Waits until the configured interval elapses, restarting the timer if config changes.
 ///
 /// Returns `false` when the config sender is dropped (worker should shut down).
-async fn wait_for_interval(config_rx: &mut ConfigWatchRx, interval_mins: fn(&Config) -> u64) -> bool {
+async fn wait_for_interval(
+    config_rx: &mut ConfigWatchRx,
+    interval_mins: fn(&Config) -> u64,
+) -> bool {
     loop {
         let mins = interval_mins(&config_rx.borrow()).max(1);
         let sleep = tokio::time::sleep(Duration::from_secs(mins.saturating_mul(60)));

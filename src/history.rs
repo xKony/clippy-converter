@@ -161,9 +161,10 @@ async fn prune_if_needed_at(path: &Path, marker: &Path, days: i64) -> Result<()>
 }
 
 fn prune_marker_path(history_path: &Path) -> PathBuf {
-    history_path
-        .parent()
-        .map_or_else(|| PathBuf::from(PRUNE_MARKER_NAME), |p| p.join(PRUNE_MARKER_NAME))
+    history_path.parent().map_or_else(
+        || PathBuf::from(PRUNE_MARKER_NAME),
+        |p| p.join(PRUNE_MARKER_NAME),
+    )
 }
 
 async fn pruned_today(marker: &Path) -> bool {

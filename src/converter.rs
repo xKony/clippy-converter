@@ -433,8 +433,14 @@ mod tests {
         let db = create_test_db();
         db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
             .unwrap();
-        db.update_unit("USD", 1.0 / 1.1, 0.0, UnitCategory::Currency, RateSource::Fiat)
-            .unwrap();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
         db.update_unit("PLN", 0.25, 0.0, UnitCategory::Currency, RateSource::Fiat)
             .unwrap();
         let converter = Converter::new(config, db);

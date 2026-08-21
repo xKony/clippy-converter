@@ -619,7 +619,13 @@ const STATIC_UNITS: &[StaticUnit] = &[
         category: UnitCategory::Volume,
         factor: 0.001,
         offset: 0.0,
-        aliases: &["ml", "milliliter", "milliliters", "millilitre", "millilitres"],
+        aliases: &[
+            "ml",
+            "milliliter",
+            "milliliters",
+            "millilitre",
+            "millilitres",
+        ],
     },
     StaticUnit {
         symbol: "gal",
