@@ -46,12 +46,16 @@ fn should_accept_candidate(
             // Higher priority wins unless the candidate is itself far staler than
             // the cache (e.g. a replayed old crypto batch over fresh fiat data).
             candidate_timestamp
-                >= existing.timestamp.saturating_sub(SOURCE_PRIORITY_GRACE_SECS)
+                >= existing
+                    .timestamp
+                    .saturating_sub(SOURCE_PRIORITY_GRACE_SECS)
         }
         std::cmp::Ordering::Less => {
             // Lower priority only wins when it is significantly newer than the cache.
             candidate_timestamp
-                > existing.timestamp.saturating_add(SOURCE_PRIORITY_GRACE_SECS)
+                > existing
+                    .timestamp
+                    .saturating_add(SOURCE_PRIORITY_GRACE_SECS)
         }
     }
 }
@@ -1296,7 +1300,11 @@ mod tests {
             source: RateSource::Fiat as u8,
         };
         assert!(should_accept_candidate(&fiat, RateSource::Fiat as u8, 1001));
-        assert!(!should_accept_candidate(&fiat, RateSource::Fiat as u8, 1000));
+        assert!(!should_accept_candidate(
+            &fiat,
+            RateSource::Fiat as u8,
+            1000
+        ));
         assert!(!should_accept_candidate(&fiat, RateSource::Fiat as u8, 999));
     }
 
@@ -1321,7 +1329,11 @@ mod tests {
             RateSource::Crypto as u8,
             100_000 - SOURCE_PRIORITY_GRACE_SECS + 1
         ));
-        assert!(should_accept_candidate(&fiat_now, RateSource::Crypto as u8, 200_000));
+        assert!(should_accept_candidate(
+            &fiat_now,
+            RateSource::Crypto as u8,
+            200_000
+        ));
     }
 
     #[test]
@@ -1362,15 +1374,23 @@ mod tests {
 
         // Next daily fiat refresh is still inside the grace window: skipped.
         let updated = db
-            .update_rates_batch([("BTC".to_string(), 49_000.0)], 10_000 + 3600, RateSource::Fiat)
+            .update_rates_batch(
+                [("BTC".to_string(), 49_000.0)],
+                10_000 + 3600,
+                RateSource::Fiat,
+            )
             .unwrap();
         assert_eq!(updated, 0);
         let btc = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(btc.source, RateSource::Crypto as u8);
 
         // Once the crypto row is older than the grace window, fiat wins.
-        let updated = db
-            .update_rate("BTC", 48_000.0, 10_000 + SOURCE_PRIORITY_GRACE_SECS + 1, RateSource::Fiat);
+        let updated = db.update_rate(
+            "BTC",
+            48_000.0,
+            10_000 + SOURCE_PRIORITY_GRACE_SECS + 1,
+            RateSource::Fiat,
+        );
         assert!(updated.is_ok());
         let btc = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(btc.source, RateSource::Fiat as u8);

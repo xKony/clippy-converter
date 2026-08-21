@@ -289,8 +289,7 @@ async fn update_crypto_rates(db: &Db, rates: &RatesStatus, config: &Config) -> R
     if !usdt_factor_is_fresh(usdt_entry.timestamp, now_unix, ttl_secs) {
         warn!(
             age_secs = now_unix.saturating_sub(usdt_entry.timestamp),
-            ttl_secs,
-            "cached USDT/EUR factor is stale; skipping crypto refresh"
+            ttl_secs, "cached USDT/EUR factor is stale; skipping crypto refresh"
         );
         return Ok(());
     }
@@ -410,10 +409,7 @@ mod tests {
         assert_eq!(usdt_factor_ttl_secs(600), 72_000);
         // 24 h interval would give 48 h, but the 24 h cap applies.
         assert_eq!(usdt_factor_ttl_secs(1_440), USDT_FACTOR_MAX_TTL_SECS);
-        assert_eq!(
-            usdt_factor_ttl_secs(u64::MAX),
-            USDT_FACTOR_MAX_TTL_SECS
-        );
+        assert_eq!(usdt_factor_ttl_secs(u64::MAX), USDT_FACTOR_MAX_TTL_SECS);
     }
 
     #[test]

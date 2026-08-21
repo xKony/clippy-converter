@@ -471,7 +471,10 @@ mod tests {
             ..Config::default()
         };
         let sanitized = config.sanitized();
-        assert_eq!(sanitized.fiat_update_interval_mins, DEFAULT_FIAT_INTERVAL_MINS);
+        assert_eq!(
+            sanitized.fiat_update_interval_mins,
+            DEFAULT_FIAT_INTERVAL_MINS
+        );
         assert_eq!(
             sanitized.crypto_update_interval_mins,
             DEFAULT_CRYPTO_INTERVAL_MINS
@@ -489,7 +492,10 @@ mod tests {
             sanitized.crypto_update_interval_mins,
             DEFAULT_CRYPTO_INTERVAL_MINS
         );
-        assert_eq!(sanitized.fiat_update_interval_mins, DEFAULT_FIAT_INTERVAL_MINS);
+        assert_eq!(
+            sanitized.fiat_update_interval_mins,
+            DEFAULT_FIAT_INTERVAL_MINS
+        );
     }
 
     #[test]
@@ -500,7 +506,10 @@ mod tests {
             ..Config::default()
         };
         let sanitized = config.sanitized();
-        assert_eq!(sanitized.fiat_update_interval_mins, MIN_UPDATE_INTERVAL_MINS);
+        assert_eq!(
+            sanitized.fiat_update_interval_mins,
+            MIN_UPDATE_INTERVAL_MINS
+        );
         assert_eq!(
             sanitized.crypto_update_interval_mins,
             MAX_UPDATE_INTERVAL_MINS
