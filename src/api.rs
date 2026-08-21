@@ -11,8 +11,38 @@ const FIAT_API_URLS: &[&str] = &[
     "https://latest.currency-api.pages.dev/v1/currencies/eur.json",
 ];
 
-/// Base URL for the Binance crypto price API.
-const BINANCE_API_URL: &str = "https://api.binance.com/api/v3/ticker/price";
+/// Binance public market-data endpoints, tried in order.
+///
+/// `api.binance.com` answers HTTP 451 to geo-blocked regions (e.g. US
+/// users), so we also try the official read-only public market-data mirror
+/// (`data-api.binance.vision`) and the numbered API hosts before giving up.
+const BINANCE_API_URLS: &[&str] = &[
+    "https://api.binance.com/api/v3/ticker/price",
+    "https://data-api.binance.vision/api/v3/ticker/price",
+    "https://api1.binance.com/api/v3/ticker/price",
+    "https://api2.binance.com/api/v3/ticker/price",
+    "https://api3.binance.com/api/v3/ticker/price",
+];
+
+/// Extra attempts per Binance URL once the first try has failed.
+///
+/// Every failure counts against this budget regardless of kind — connect
+/// errors, timeouts, any HTTP status (including 451), or a bad payload.
+/// Telling transient blips apart from permanent ones is not worth the
+/// complexity here: 451 is cured by moving on to the next mirror anyway,
+/// and the whole budget adds at most ~1.2 s per URL before that happens.
+const BINANCE_RETRIES_PER_URL: u32 = 2;
+
+/// Delay before the first retry; each further retry triples it.
+const RETRY_BACKOFF_BASE: Duration = Duration::from_millis(300);
+
+/// Backoff delay before the given zero-based retry attempt.
+///
+/// Grows exponentially (`300 ms`, `900 ms`, …) and saturates at
+/// [`Duration::MAX`] instead of overflowing for absurd inputs.
+const fn retry_backoff_delay(retry: u32) -> Duration {
+    RETRY_BACKOFF_BASE.saturating_mul(3_u32.saturating_pow(retry))
+}
 
 /// Quote currency suffix used to identify the crypto pairs we care about.
 const USDT_SUFFIX: &str = "USDT";
@@ -28,14 +58,24 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Building a fresh client per-request (as `reqwest::get` does) discards
 /// connection pooling and, more importantly, has no timeouts configured,
 /// which can leave requests hanging indefinitely on a stalled connection.
-/// Falls back to the default client (no explicit timeouts) if construction
-/// somehow fails, so callers always get a usable client.
+/// If construction somehow fails (practically only TLS backend init), we
+/// log loudly and degrade to the default client, which lacks the timeouts.
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
+    match reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .unwrap_or_default()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to build reqwest client with timeouts; \
+                 degrading to default client without them"
+            );
+            reqwest::Client::new()
+        }
+    }
 });
 
 /// Internal struct for parsing the `FawazAhmed` fiat API response.
@@ -106,11 +146,37 @@ fn normalize_fiat_rates(eur: HashMap<String, f64>) -> HashMap<String, f64> {
 /// here avoids deserializing and shipping the full, much larger payload
 /// through the rest of the pipeline.
 ///
+/// Hosts are tried in [`BINANCE_API_URLS`] order; each gets one initial
+/// attempt plus up to [`BINANCE_RETRIES_PER_URL`] retries with exponential
+/// backoff (see [`retry_backoff_delay`]) before we move on to the next host.
+/// HTTP error statuses fail an attempt via `error_for_status` instead of
+/// being parsed as JSON.
+///
 /// # Errors
-/// Returns an error if the network request fails or the response cannot be parsed.
+/// Returns an error if every URL fails to connect, returns a bad status,
+/// or cannot be parsed; the last seen error is surfaced.
 pub(crate) async fn fetch_binance_tickers() -> Result<Vec<BinanceTicker>> {
+    let mut last_error = None;
+    for url in BINANCE_API_URLS {
+        for retry in 0..=BINANCE_RETRIES_PER_URL {
+            if retry > 0 {
+                tokio::time::sleep(retry_backoff_delay(retry - 1)).await;
+            }
+            match fetch_binance_from_url(url).await {
+                Ok(tickers) => return Ok(tickers),
+                Err(err) => {
+                    warn!(url, attempt = retry + 1, error = %err, "Binance API request failed");
+                    last_error = Some(err);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("no Binance API URLs configured")))
+}
+
+async fn fetch_binance_from_url(url: &str) -> Result<Vec<BinanceTicker>> {
     let response = HTTP_CLIENT
-        .get(BINANCE_API_URL)
+        .get(url)
         .send()
         .await
         .context("Failed to connect to Binance API")?
@@ -188,6 +254,43 @@ mod tests {
         assert_eq!(tickers.len(), 2);
         assert_eq!(tickers[0].symbol, "BTCUSDT");
         assert_eq!(tickers[0].price, "66341.21000000");
+    }
+
+    #[test]
+    fn binance_api_urls_should_include_vision_mirror_and_numbered_hosts() {
+        assert!(BINANCE_API_URLS[0].contains("api.binance.com"));
+        assert!(BINANCE_API_URLS[1].contains("data-api.binance.vision"));
+        for (index, host) in ["api1", "api2", "api3"].iter().enumerate() {
+            assert!(
+                BINANCE_API_URLS[2 + index].contains(host),
+                "expected host `{host}` at index {}",
+                2 + index
+            );
+        }
+        assert!(
+            BINANCE_API_URLS
+                .iter()
+                .all(|url| url.ends_with("/api/v3/ticker/price"))
+        );
+    }
+
+    #[test]
+    fn retry_backoff_should_grow_exponentially_within_budget() {
+        assert_eq!(retry_backoff_delay(0), Duration::from_millis(300));
+        assert_eq!(retry_backoff_delay(1), Duration::from_millis(900));
+        assert_eq!(
+            retry_backoff_delay(BINANCE_RETRIES_PER_URL - 1),
+            Duration::from_millis(900)
+        );
+    }
+
+    #[test]
+    fn retry_backoff_should_saturate_instead_of_overflowing() {
+        // `saturating_pow` clamps the factor to `u32::MAX`; the resulting
+        // duration still fits in `Duration`, so this must simply not panic.
+        let huge = retry_backoff_delay(u32::MAX);
+        assert_eq!(huge, Duration::from_millis(300) * u32::MAX);
+        assert!(huge > retry_backoff_delay(10));
     }
 
     fn ticker(symbol: &str) -> BinanceTicker {
