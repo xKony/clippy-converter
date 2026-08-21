@@ -101,6 +101,8 @@ pub struct AppState {
     unit_filter_query: Option<String>,
     /// Memoized, favorites-first, truncated unit list for the unit picker.
     unit_filter_results: Vec<UnitInfo>,
+    /// Highlighted row in the unit picker or results list (arrow keys / Enter).
+    list_cursor: usize,
 }
 
 const CONVERTER_INNER_SIZE: egui::Vec2 = egui::vec2(350.0, 420.0);
@@ -409,6 +411,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 recent_history: Vec::new(),
                 unit_filter_query: None,
                 unit_filter_results: Vec::new(),
+                list_cursor: 0,
             }))
         }),
     )
@@ -636,6 +639,7 @@ impl AppState {
         self.captured_value = 0.0;
         self.search_query.clear();
         self.search_query_lower.clear();
+        self.list_cursor = 0;
     }
 
     /// Asks the background worker to reload recent history; results arrive via
@@ -662,6 +666,50 @@ impl AppState {
         matching.truncate(self.config.list_size);
         self.unit_filter_results = matching;
         self.unit_filter_query = Some(self.search_query_lower.clone());
+        self.list_cursor = 0;
+    }
+
+    fn step_list_cursor(&mut self, ui: &egui::Ui, len: usize) -> bool {
+        if len == 0 {
+            self.list_cursor = 0;
+            return false;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.list_cursor = self.list_cursor.saturating_add(1).min(len.saturating_sub(1));
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.list_cursor = self.list_cursor.saturating_sub(1);
+        }
+        if self.list_cursor >= len {
+            self.list_cursor = len.saturating_sub(1);
+        }
+        ui.input(|i| i.key_pressed(egui::Key::Enter))
+    }
+
+    fn apply_source_symbol(&mut self, symbol: &str) {
+        if let Ok(result) = self.converter.convert(self.captured_value, symbol) {
+            self.current_result = Some(result);
+            self.current_mode = WindowMode::Results;
+            self.search_query.clear();
+            self.search_query_lower.clear();
+            self.list_cursor = 0;
+            self.log_conversion_if_enabled();
+            self.focus_main_input = true;
+        }
+    }
+
+    fn copy_value_to_clipboard(&mut self, ctx: &egui::Context, value: f64, dismiss: bool) {
+        if value.is_nan() || value.is_infinite() {
+            self.copied_notification = Some(("Invalid value".to_string(), Instant::now()));
+            return;
+        }
+        if self.clipboard.set_text(format_copy(value)).is_ok() {
+            self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
+            if dismiss {
+                self.main_window_open = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
     }
 
     /// Shows the converter popup at the cursor (clipboard capture is optional and separate).
@@ -1064,39 +1112,11 @@ impl AppState {
                 );
                 if response.changed() {
                     self.search_query_lower = self.search_query.to_lowercase();
+                    self.list_cursor = 0;
                 }
                 if self.focus_main_input {
                     response.request_focus();
                     self.focus_main_input = false;
-                }
-
-                if self.current_mode == WindowMode::SourceUnitSelection
-                    && response.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    && !self.search_query_lower.is_empty()
-                {
-                    // Borrow the cached unit list to find a match without cloning
-                    // the whole table; only the matched symbol is cloned.
-                    let matched_symbol = self.converter.all_units().ok().and_then(|all_units| {
-                        let exact = all_units
-                            .iter()
-                            .find(|u| u.matches_exact(&self.search_query_lower));
-                        let partial = all_units
-                            .iter()
-                            .find(|u| u.matches(&self.search_query_lower));
-                        exact.or(partial).map(|u| u.info.symbol.clone())
-                    });
-
-                    if let Some(symbol) = matched_symbol
-                        && let Ok(result) = self.converter.convert(self.captured_value, &symbol)
-                    {
-                        self.current_result = Some(result);
-                        self.current_mode = WindowMode::Results;
-                        self.search_query.clear();
-                        self.search_query_lower.clear();
-                        self.log_conversion_if_enabled();
-                        self.focus_main_input = true;
-                    }
                 }
             });
 
@@ -1110,13 +1130,23 @@ impl AppState {
                     self.recompute_unit_filter();
                 }
 
+                let enter = self.step_list_cursor(ui, self.unit_filter_results.len());
+                if enter
+                    && let Some(unit) = self.unit_filter_results.get(self.list_cursor)
+                {
+                    let symbol = unit.symbol.clone();
+                    self.apply_source_symbol(&symbol);
+                }
+
                 let mut clicked_symbol: Option<String> = None;
+                let highlight = ui.visuals().selection.bg_fill;
+                let cursor = self.list_cursor;
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
-                            for unit in &self.unit_filter_results {
+                            for (idx, unit) in self.unit_filter_results.iter().enumerate() {
                                 let aliases_str = if unit.aliases.is_empty() {
                                     String::new()
                                 } else {
@@ -1125,12 +1155,12 @@ impl AppState {
 
                                 let button_text =
                                     egui::RichText::new(format!("{} {}", unit.symbol, aliases_str));
-                                if ui
-                                    .add(
-                                        egui::Button::new(button_text)
-                                            .fill(egui::Color32::TRANSPARENT),
-                                    )
-                                    .clicked()
+                                let fill = if idx == cursor {
+                                    highlight
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                if ui.add(egui::Button::new(button_text).fill(fill)).clicked()
                                 {
                                     clicked_symbol = Some(unit.symbol.clone());
                                 }
@@ -1138,15 +1168,8 @@ impl AppState {
                         });
                     });
 
-                if let Some(symbol) = clicked_symbol
-                    && let Ok(result) = self.converter.convert(self.captured_value, &symbol)
-                {
-                    self.current_result = Some(result);
-                    self.current_mode = WindowMode::Results;
-                    self.search_query.clear();
-                    self.search_query_lower.clear();
-                    self.log_conversion_if_enabled();
-                    self.focus_main_input = true;
+                if let Some(symbol) = clicked_symbol {
+                    self.apply_source_symbol(&symbol);
                 }
             } else if self.current_mode == WindowMode::Results {
                 let outputs = if let Some(result) = &self.current_result {
@@ -1161,13 +1184,22 @@ impl AppState {
                     Vec::new()
                 };
 
+                let enter = self.step_list_cursor(ui, outputs.len());
+                if enter
+                    && let Some(output) = outputs.get(self.list_cursor)
+                {
+                    self.copy_value_to_clipboard(ctx, output.value, true);
+                }
+
                 if !outputs.is_empty() {
+                    let highlight = ui.visuals().selection.bg_fill;
+                    let cursor = self.list_cursor;
                     egui::ScrollArea::vertical()
                         .max_height(300.0)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                for output in outputs {
+                                for (idx, output) in outputs.iter().enumerate() {
                                     let is_favorite = self.config.favorites.contains(&output.unit);
                                     let favorite_icon = if is_favorite {
                                         egui::include_image!("../icons/favorite_on.svg")
@@ -1182,6 +1214,12 @@ impl AppState {
                                     };
 
                                     ui.add_space(2.0);
+                                    let fill = if idx == cursor {
+                                        highlight
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
+                                    egui::Frame::new().fill(fill).show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
                                             ui.label(
@@ -1254,26 +1292,15 @@ impl AppState {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    if output.value.is_nan()
-                                                        || output.value.is_infinite()
-                                                    {
-                                                        self.copied_notification = Some((
-                                                            "Invalid value".to_string(),
-                                                            Instant::now(),
-                                                        ));
-                                                    } else {
-                                                        let val_str = format_copy(output.value);
-                                                        if self.clipboard.set_text(val_str).is_ok()
-                                                        {
-                                                            self.copied_notification = Some((
-                                                                "Copied!".to_string(),
-                                                                Instant::now(),
-                                                            ));
-                                                        }
-                                                    }
+                                                    self.copy_value_to_clipboard(
+                                                        ctx,
+                                                        output.value,
+                                                        false,
+                                                    );
                                                 }
                                             },
                                         );
+                                    });
                                     });
                                     ui.separator();
                                 }
