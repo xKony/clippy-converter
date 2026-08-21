@@ -1,4 +1,4 @@
-use crate::clipboard::ClipboardManager;
+use crate::clipboard::{CaptureOutcome, ClipboardManager};
 use crate::converter::Converter;
 use crate::db::Db;
 use crate::format::{format_copy, format_display};
@@ -85,8 +85,8 @@ pub struct AppState {
 
     /// Signals the background clipboard worker to capture the current selection.
     capture_req_tx: Sender<()>,
-    /// Receives captured selection text from the background worker.
-    capture_res_rx: Receiver<anyhow::Result<String>>,
+    /// Receives capture outcomes from the background worker.
+    capture_res_rx: Receiver<anyhow::Result<CaptureOutcome>>,
     /// True while waiting for background clipboard capture (selection-on-hotkey mode).
     pub capture_pending: bool,
     /// Hotkey fired with read-selection enabled; popup opens after capture completes.
@@ -219,7 +219,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
     let (tx, rx) = mpsc::channel();
 
     let (capture_req_tx, capture_req_rx) = mpsc::channel::<()>();
-    let (capture_res_tx, capture_res_rx) = mpsc::channel::<anyhow::Result<String>>();
+    let (capture_res_tx, capture_res_rx) = mpsc::channel::<anyhow::Result<CaptureOutcome>>();
 
     let (recent_req_tx, recent_req_rx) = mpsc::channel::<()>();
     let (recent_res_tx, recent_res_rx) = mpsc::channel::<Vec<HistoryItem>>();
@@ -735,11 +735,39 @@ impl AppState {
         ctx.request_repaint();
     }
 
-    /// Applies text captured in the background worker (parse, convert, update mode).
-    fn apply_capture_result(&mut self, capture_result: anyhow::Result<String>) {
+    /// Applies a background capture outcome: parse-and-convert on success,
+    /// or surface a short hint explaining why nothing was captured.
+    fn apply_capture_result(&mut self, capture_result: anyhow::Result<CaptureOutcome>) {
         self.capture_pending = false;
 
-        if let Ok(parsed) = capture_result.and_then(|text| crate::parser::parse_input(&text)) {
+        let parsed = match capture_result {
+            Err(err) => Err(err),
+            Ok(CaptureOutcome::Text(text)) => crate::parser::parse_input(&text),
+            // The copy answered with an empty string: nothing was selected.
+            Ok(CaptureOutcome::EmptySelection) => {
+                self.captured_value = 0.0;
+                self.current_result = None;
+                self.current_mode = WindowMode::ValueInput;
+                self.manual_input_value = String::new();
+                self.focus_main_input = true;
+                self.copied_notification = Some(("Nothing selected".to_string(), Instant::now()));
+                return;
+            }
+            // The target app never answered the simulated Ctrl+C (elevated
+            // window, RDP, clipboard-manager interference).
+            Ok(CaptureOutcome::NoResponse) => {
+                self.captured_value = 0.0;
+                self.current_result = None;
+                self.current_mode = WindowMode::ValueInput;
+                self.manual_input_value = String::new();
+                self.focus_main_input = true;
+                self.copied_notification =
+                    Some(("Could not read selection".to_string(), Instant::now()));
+                return;
+            }
+        };
+
+        if let Ok(parsed) = parsed {
             self.apply_parsed_input(parsed);
         } else {
             self.captured_value = 0.0;
