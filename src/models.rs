@@ -5,6 +5,20 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{error, warn};
+
+use crate::hotkey;
+
+/// Default global hotkey combination.
+pub const DEFAULT_HOTKEY: &str = "Shift+Alt+C";
+/// Minimum allowed rate-refresh interval in minutes.
+pub const MIN_UPDATE_INTERVAL_MINS: u64 = 5;
+/// Maximum allowed rate-refresh interval in minutes (one week).
+pub const MAX_UPDATE_INTERVAL_MINS: u64 = 10_080;
+/// Default fiat refresh interval in minutes.
+pub const DEFAULT_FIAT_INTERVAL_MINS: u64 = 1440;
+/// Default crypto refresh interval in minutes.
+pub const DEFAULT_CRYPTO_INTERVAL_MINS: u64 = 60;
 
 /// Configuration for the Clippy Converter application.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +114,24 @@ const fn default_true() -> bool {
     true
 }
 
+/// Returns `mins` when inside `MIN_UPDATE_INTERVAL_MINS..=MAX_UPDATE_INTERVAL_MINS`,
+/// otherwise warns and returns `default`.
+#[must_use]
+pub fn sanitize_interval_mins(field: &'static str, mins: u64, default: u64) -> u64 {
+    if (MIN_UPDATE_INTERVAL_MINS..=MAX_UPDATE_INTERVAL_MINS).contains(&mins) {
+        mins
+    } else {
+        warn!(
+            field,
+            mins,
+            min = MIN_UPDATE_INTERVAL_MINS,
+            max = MAX_UPDATE_INTERVAL_MINS,
+            "refresh interval out of range; falling back to default"
+        );
+        default
+    }
+}
+
 /// Optional unit groups the user can toggle in Settings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[expect(
@@ -174,13 +206,13 @@ impl Default for Config {
                 "kg".to_string(),
                 "lb".to_string(),
             ],
-            hotkey: "Shift+Alt+C".to_string(),
+            hotkey: DEFAULT_HOTKEY.to_string(),
             read_selection_on_hotkey: true,
             list_size: 10,
             history_enabled: false,
             history_retention: HistoryRetention::ThirtyDays,
-            fiat_update_interval_mins: 1440, // Daily
-            crypto_update_interval_mins: 60, // Every hour
+            fiat_update_interval_mins: DEFAULT_FIAT_INTERVAL_MINS, // Daily
+            crypto_update_interval_mins: DEFAULT_CRYPTO_INTERVAL_MINS, // Every hour
             thousand_separator: ThousandSeparator::None,
             unit_packs: UnitPacks::default(),
             start_with_windows: false,
@@ -191,18 +223,61 @@ impl Default for Config {
 impl Config {
     /// Loads the configuration from the user's config directory.
     ///
+    /// Invalid or corrupt fields are salvaged: out-of-range values and unparseable
+    /// hotkeys fall back to their defaults with a warning, and a wholly corrupt
+    /// file falls back to [`Config::default`] instead of failing startup.
+    ///
     /// # Errors
-    /// Returns an error if the config directory cannot be determined or if the file exists but is invalid.
+    /// Returns an error only if the config directory cannot be determined or the
+    /// existing file cannot be read (parse failures are salvaged, not propagated).
     pub fn load() -> Result<Self> {
         let path = get_config_path()?;
         if !path.exists() {
             return Ok(Self::default());
         }
+        Self::load_from_path(&path)
+    }
 
-        let content = fs::read_to_string(&path)
+    /// Loads the configuration from an explicit path. Split out so tests can use
+    /// temp files instead of the real user config directory.
+    fn load_from_path(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file at {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse config file at {}", path.display()))
+        Ok(Self::from_json(&content))
+    }
+
+    /// Parses config JSON, salvaging per-field problems:
+    /// a parse failure logs an error and returns defaults; individual out-of-range
+    /// or invalid fields are replaced by their defaults with a warning.
+    #[must_use]
+    pub fn from_json(content: &str) -> Self {
+        match serde_json::from_str::<Self>(content) {
+            Ok(config) => config.sanitized(),
+            Err(err) => {
+                error!(error = %err, "failed to parse config JSON; using default config");
+                Self::default()
+            }
+        }
+    }
+
+    /// Returns a copy with any invalid field replaced by its default (with a warning).
+    #[must_use]
+    pub fn sanitized(mut self) -> Self {
+        self.fiat_update_interval_mins = sanitize_interval_mins(
+            "fiat_update_interval_mins",
+            self.fiat_update_interval_mins,
+            DEFAULT_FIAT_INTERVAL_MINS,
+        );
+        self.crypto_update_interval_mins = sanitize_interval_mins(
+            "crypto_update_interval_mins",
+            self.crypto_update_interval_mins,
+            DEFAULT_CRYPTO_INTERVAL_MINS,
+        );
+        if hotkey::parse_hotkey(&self.hotkey).is_err() {
+            warn!(hotkey = %self.hotkey, "invalid hotkey in config; falling back to default");
+            self.hotkey = DEFAULT_HOTKEY.to_string();
+        }
+        self
     }
 
     /// Saves the configuration to the user's config directory.
@@ -387,5 +462,126 @@ mod tests {
         assert!(config.unit_packs.volume);
         assert!(!config.unit_packs.scientific);
         assert!(!config.start_with_windows);
+    }
+
+    #[test]
+    fn sanitized_should_salvage_fiat_interval_below_minimum_to_default() {
+        let config = Config {
+            fiat_update_interval_mins: MIN_UPDATE_INTERVAL_MINS - 1,
+            ..Config::default()
+        };
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.fiat_update_interval_mins, DEFAULT_FIAT_INTERVAL_MINS);
+        assert_eq!(
+            sanitized.crypto_update_interval_mins,
+            DEFAULT_CRYPTO_INTERVAL_MINS
+        );
+    }
+
+    #[test]
+    fn sanitized_should_salvage_crypto_interval_above_maximum_to_default() {
+        let config = Config {
+            crypto_update_interval_mins: MAX_UPDATE_INTERVAL_MINS + 1,
+            ..Config::default()
+        };
+        let sanitized = config.sanitized();
+        assert_eq!(
+            sanitized.crypto_update_interval_mins,
+            DEFAULT_CRYPTO_INTERVAL_MINS
+        );
+        assert_eq!(sanitized.fiat_update_interval_mins, DEFAULT_FIAT_INTERVAL_MINS);
+    }
+
+    #[test]
+    fn sanitized_should_keep_intervals_at_inclusive_bounds() {
+        let config = Config {
+            fiat_update_interval_mins: MIN_UPDATE_INTERVAL_MINS,
+            crypto_update_interval_mins: MAX_UPDATE_INTERVAL_MINS,
+            ..Config::default()
+        };
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.fiat_update_interval_mins, MIN_UPDATE_INTERVAL_MINS);
+        assert_eq!(
+            sanitized.crypto_update_interval_mins,
+            MAX_UPDATE_INTERVAL_MINS
+        );
+    }
+
+    #[test]
+    fn sanitized_should_salvage_invalid_hotkey_string_to_default() {
+        for bad in ["", "NotAKey", "Shift+", "Shift+Alt+C+D", "   "] {
+            let config = Config {
+                hotkey: bad.to_string(),
+                ..Config::default()
+            };
+            let sanitized = config.sanitized();
+            assert_eq!(sanitized.hotkey, DEFAULT_HOTKEY, "input was {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitized_should_keep_valid_hotkey_string_untouched() {
+        let config = Config {
+            hotkey: "Ctrl+Space".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(config.sanitized().hotkey, "Ctrl+Space");
+    }
+
+    #[test]
+    fn from_json_should_fall_back_to_defaults_for_wholly_corrupt_json() {
+        let config = Config::from_json("{not valid json!!");
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn from_json_should_salvage_valid_fields_alongside_invalid_ones() {
+        let json = format!(
+            r#"{{
+                "favorites": ["USD"],
+                "hotkey": "Bogus",
+                "list_size": 10,
+                "history_enabled": false,
+                "history_retention": "ThirtyDays",
+                "fiat_update_interval_mins": {},
+                "crypto_update_interval_mins": {}
+            }}"#,
+            MIN_UPDATE_INTERVAL_MINS - 1,
+            MAX_UPDATE_INTERVAL_MINS + 1
+        );
+        let config = Config::from_json(&json);
+        assert_eq!(config.favorites, vec!["USD".to_string()]);
+        assert_eq!(config.hotkey, DEFAULT_HOTKEY);
+        assert_eq!(config.fiat_update_interval_mins, DEFAULT_FIAT_INTERVAL_MINS);
+        assert_eq!(
+            config.crypto_update_interval_mins,
+            DEFAULT_CRYPTO_INTERVAL_MINS
+        );
+    }
+
+    #[test]
+    fn load_from_path_should_preserve_valid_config_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let original = Config {
+            fiat_update_interval_mins: MIN_UPDATE_INTERVAL_MINS,
+            crypto_update_interval_mins: MAX_UPDATE_INTERVAL_MINS,
+            hotkey: "Ctrl+Space".to_string(),
+            ..Config::default()
+        };
+        fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
+
+        let loaded = Config::load_from_path(&path).unwrap();
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn load_from_path_should_fall_back_to_defaults_for_corrupt_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "{{{ definitely not JSON").unwrap();
+
+        let loaded = Config::load_from_path(&path).unwrap();
+        assert_eq!(loaded, Config::default());
     }
 }

@@ -1,5 +1,19 @@
 use anyhow::{Context, Result, anyhow};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use tracing::warn;
+
+/// Parses a hotkey string like "Shift+Alt+C" into a `HotKey`, falling back to
+/// the default (`Shift+Alt+C`) with a warning when the string is invalid.
+///
+/// Use this on any path that registers a hotkey so registration never receives
+/// an unparseable value.
+#[must_use]
+pub fn parse_hotkey_or_default(s: &str) -> HotKey {
+    parse_hotkey(s).unwrap_or_else(|err| {
+        warn!(error = %err, hotkey = %s, "invalid hotkey; falling back to default");
+        HotKey::new(Some(Modifiers::SHIFT | Modifiers::ALT), Code::KeyC)
+    })
+}
 
 /// Parses a hotkey string like "Shift+Alt+C" into a `HotKey`.
 ///
