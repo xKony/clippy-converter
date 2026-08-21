@@ -98,10 +98,9 @@ mod tests {
     #[test]
     fn run_value_bytes_should_quote_path_and_nul_terminate() {
         let bytes = run_value_bytes(&PathBuf::from(r"C:\Program Files\clippy-converter.exe"));
-        let u16s: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let u16s: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
         assert_eq!(u16s.last().copied(), Some(0));
         let text = String::from_utf16_lossy(&u16s[..u16s.len() - 1]);
         assert_eq!(text, r#""C:\Program Files\clippy-converter.exe""#);
