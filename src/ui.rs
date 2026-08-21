@@ -105,9 +105,15 @@ pub struct AppState {
     unit_filter_results: Vec<UnitInfo>,
     /// Highlighted row in the unit picker or results list (arrow keys / Enter).
     list_cursor: usize,
+    /// Last inner size we commanded for the converter popup; `None` forces a
+    /// re-apply (used after settings morphs the shared OS window).
+    applied_inner_size: Option<egui::Vec2>,
 }
 
-const CONVERTER_INNER_SIZE: egui::Vec2 = egui::vec2(350.0, 420.0);
+const CONVERTER_INNER_SIZE: egui::Vec2 = egui::vec2(330.0, 400.0);
+/// Compact popup for bare value-input mode (no unit list, no recent
+/// history) - the fixed 420 px height used to leave a large dead zone.
+const CONVERTER_COMPACT_SIZE: egui::Vec2 = egui::vec2(330.0, 250.0);
 const SETTINGS_INNER_SIZE: egui::Vec2 = egui::vec2(440.0, 560.0);
 const SETTINGS_MIN_INNER_SIZE: egui::Vec2 = egui::vec2(380.0, 420.0);
 /// How long the "Copied!" notification stays visible.
@@ -137,7 +143,6 @@ fn apply_converter_viewport(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
         egui::WindowLevel::AlwaysOnTop,
     ));
-    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(CONVERTER_INNER_SIZE));
 }
 
 fn apply_settings_viewport(ctx: &egui::Context) {
@@ -178,7 +183,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false)
-            .with_inner_size([350.0, 420.0]),
+            .with_inner_size([330.0, 400.0]),
         run_and_return: false,
         vsync: true,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
@@ -409,6 +414,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 unit_filter_query: None,
                 unit_filter_results: Vec::new(),
                 list_cursor: 0,
+                applied_inner_size: None,
             }))
         }),
     )
@@ -443,6 +449,9 @@ impl AppState {
                 }
                 EventMsg::OpenSettings => {
                     self.settings_window_open = true;
+                    // The settings viewport commands its own size; forget the
+                    // converter size so it is re-applied on the way back.
+                    self.applied_inner_size = None;
                     apply_settings_viewport(ctx);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -531,6 +540,7 @@ impl AppState {
 
             if ctx.input(|i| i.viewport().close_requested()) {
                 self.settings_window_open = false;
+                self.applied_inner_size = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 apply_converter_viewport(ctx);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(self.main_window_open));
@@ -544,6 +554,18 @@ impl AppState {
         // to avoid issuing OS window calls on every repaint.
         if !self.main_window_open {
             return;
+        }
+
+        // Compact sizing: the popup shrinks when the mode has little content
+        // (bare value input) and grows for lists / recent history. Only sent
+        // on change to avoid per-frame OS window calls.
+        let desired = match self.current_mode {
+            WindowMode::ValueInput if self.recent_history.is_empty() => CONVERTER_COMPACT_SIZE,
+            _ => CONVERTER_INNER_SIZE,
+        };
+        if self.applied_inner_size != Some(desired) {
+            self.applied_inner_size = Some(desired);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
         }
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
@@ -567,7 +589,7 @@ impl AppState {
         // Add padding via a frame with no extra fill
         let content_frame = egui::Frame {
             fill: egui::Color32::TRANSPARENT,
-            inner_margin: egui::Margin::same(16),
+            inner_margin: egui::Margin::same(12),
             ..Default::default()
         };
 
@@ -767,6 +789,7 @@ impl AppState {
         self.main_window_open = true;
         self.main_window_was_focused = false;
         self.focus_main_input = true;
+        self.applied_inner_size = None;
 
         apply_converter_viewport(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.main_window_pos));

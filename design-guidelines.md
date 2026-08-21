@@ -43,24 +43,46 @@ Rules:
 
 | Surface | Radius |
 |---|---|
-| OS window (popup & settings) | 12 logical px, DWM-rounded on Win 11+ (`placement::round_window_corners`) |
-| Widgets (buttons, inputs) | 6 |
-| List rows | 6 (`theme::ROW_CORNER_RADIUS`) |
+| OS window (popup & settings) | DWM-rounded on Win 11+ (`placement::round_window_corners`) |
+| egui window corner radius | 16 logical px |
+| Widgets (buttons, inputs) | 8 |
+| List rows | 8 (`theme::ROW_CORNER_RADIUS`) |
 
 Windows 10 falls back to square OS corners silently — do not add custom
 transparency masks to fake rounding; the DWM path is the whole solution.
+The visible OS shadow of a DWM-rounded borderless window is drawn by
+Windows itself and is not tunable; do not try to fake a softer one.
+
+## Popup sizing
+
+The converter popup is **mode-adaptive** (`ui.rs`, `CONVERTER_COMPACT_SIZE`
+vs `CONVERTER_INNER_SIZE`):
+
+- Bare value input with no recent history: **330×250** — never leave a dead
+  zone below the input field.
+- Unit list / results / recent history visible: **330×400**.
+
+New modes must declare which size they need in the per-frame size sync;
+send `ViewportCommand::InnerSize` only when the desired size changes.
 
 ## Row states (unit picker & results)
 
 - **Rest:** transparent fill, no stroke. Rows separate via spacing + hairline
   separators (results list), not boxes.
 - **Current row** (keyboard cursor, or last row the mouse was over): fill
-  `theme::row_cursor_wash()`, radius 6. Hovering any row sets the cursor to
+  `theme::row_cursor_wash()`, radius 8. Hovering any row sets the cursor to
   that row — Enter then acts on the row under the mouse, which is why hover
   does not get its own visual state.
 - **Pressed:** egui default widget active state.
 - Rows must never shift layout between states: apply margins/spacing to all
   rows, not just the highlighted one.
+
+## Spacing
+
+- Item spacing: 10×10, window margin 12, button padding 8×4 (`theme.rs`);
+  popup content frame margin 12.
+- List rows: 2 px vertical breathing room plus separators; keep row inner
+  margin symmetric `(6, 4)` so text aligns across states.
 
 ## Typography
 

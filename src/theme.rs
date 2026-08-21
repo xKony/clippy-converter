@@ -13,7 +13,7 @@ pub fn row_cursor_wash() -> egui::Color32 {
 }
 
 /// Corner radius used for interactive list rows (matches widget radius).
-pub const ROW_CORNER_RADIUS: u8 = 6;
+pub const ROW_CORNER_RADIUS: u8 = 8;
 
 /// Applies a modern dark theme to the egui context.
 pub fn apply_theme(ctx: &egui::Context) {
@@ -31,12 +31,12 @@ pub fn apply_theme(ctx: &egui::Context) {
         egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(180, 180, 180));
 
     // Rounded corners
-    visuals.window_corner_radius = egui::CornerRadius::same(12);
-    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
-    visuals.widgets.open.corner_radius = egui::CornerRadius::same(6);
+    visuals.window_corner_radius = egui::CornerRadius::same(16);
+    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(8);
+    visuals.widgets.open.corner_radius = egui::CornerRadius::same(8);
 
     // Remove shadows for a flat, modern look
     visuals.window_shadow = egui::Shadow::NONE;
