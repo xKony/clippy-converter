@@ -10,7 +10,7 @@ env:
 
 jobs:
   windows:
-    name: Windows executable
+    name: Windows executable + MSI
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +18,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --locked
+
+      # MSI packaging (packaging/clippy-converter.wxs). The MSI version comes
+      # from Cargo.toml [package].version, parsed below and forwarded to candle
+      # as -dVersion (the .wxs consumes it via $(var.Version)).
+      - name: Resolve version from Cargo.toml
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          $match = [regex]::Match($manifest, '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) { throw "Could not parse [package] version from Cargo.toml" }
+          "CLIPPY_VERSION=$($match.Groups[1].Value)" >> $env:GITHUB_ENV
+          Write-Host "Package version: $($match.Groups[1].Value)"
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+          $wixBin = if ($candle) { Split-Path $candle.Source }
+                    elseif ($env:WIX) { Join-Path $env:WIX 'bin' }
+                    else { throw "WiX Toolset not found on runner (expected preinstalled 3.14 on windows-latest)" }
+          Write-Host "WiX binaries: $wixBin"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\msi" | Out-Null
+          $exePath = (Resolve-Path target/release/clippy-converter.exe).Path
+          & (Join-Path $wixBin 'candle.exe') -nologo -arch x64 `
+              "-dVersion=$env:CLIPPY_VERSION" "-dExePath=$exePath" `
+              -out "$env:RUNNER_TEMP\msi\" packaging/clippy-converter.wxs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $wixBin 'light.exe') -nologo `
+              -out "ClippyConverter-$env:CLIPPY_VERSION-x64.msi" "$env:RUNNER_TEMP\msi\clippy-converter.wixobj"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: clippy-converter-windows
-          path: target/release/clippy-converter.exe
+          path: |
+            target/release/clippy-converter.exe
+            ClippyConverter-*-x64.msi
