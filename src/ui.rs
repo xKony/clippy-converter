@@ -91,8 +91,6 @@ pub struct AppState {
     capture_res_rx: Receiver<anyhow::Result<CaptureOutcome>>,
     /// True while waiting for background clipboard capture (selection-on-hotkey mode).
     pub capture_pending: bool,
-    /// Hotkey fired with read-selection enabled; popup opens after capture completes.
-    hotkey_waiting_capture: bool,
     /// Signals the background worker to (re)load recent history from disk.
     recent_req_tx: Sender<()>,
     /// Receives freshly loaded recent history entries from the background worker.
@@ -403,7 +401,6 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 capture_req_tx,
                 capture_res_rx,
                 capture_pending: false,
-                hotkey_waiting_capture: false,
                 recent_req_tx,
                 recent_res_rx,
                 recent_history: Vec::new(),
@@ -454,13 +451,15 @@ impl AppState {
                         self.dismiss_settings_for_popup(ctx);
                     }
                     self.reset_converter_popup_state();
+                    // Show the popup immediately - selection capture runs in
+                    // the background and fills the result in via a spinner in
+                    // the header, so hotkey-to-window latency does not include
+                    // the target app's copy-response time.
+                    self.request_recent_history();
+                    self.show_converter_window(ctx);
                     if self.config.read_selection_on_hotkey {
-                        self.hotkey_waiting_capture = true;
                         self.capture_pending = true;
                         let _ = self.capture_req_tx.send(());
-                    } else {
-                        self.request_recent_history();
-                        self.show_converter_window(ctx);
                     }
                 }
             }
@@ -489,13 +488,10 @@ impl AppState {
         self.handle_events(ctx);
 
         if let Ok(capture_result) = self.capture_res_rx.try_recv() {
-            let waiting_show = self.hotkey_waiting_capture;
+            // The popup is already visible (shown at hotkey time); this just
+            // fills the captured result in. If the user dismissed it before
+            // the capture landed, only the hidden state updates.
             self.apply_capture_result(capture_result);
-            if waiting_show {
-                self.hotkey_waiting_capture = false;
-                self.request_recent_history();
-                self.show_converter_window(ctx);
-            }
             ctx.request_repaint();
         }
 
@@ -739,8 +735,8 @@ impl AppState {
     /// Switches the single OS window out of settings mode so a converter
     /// popup can take over. Only the mode flag and viewport styling change;
     /// settings widget state is intentionally preserved. The window is hidden
-    /// until [`Self::show_converter_window`] re-shows it at the cursor
-    /// (immediately, or once a pending clipboard capture completes).
+    /// until [`Self::show_converter_window`] re-shows it at the cursor on the
+    /// next hotkey trigger.
     fn dismiss_settings_for_popup(&mut self, ctx: &egui::Context) {
         self.settings_window_open = false;
         apply_converter_viewport(ctx);
