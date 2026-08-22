@@ -2,7 +2,7 @@ use crate::clipboard::{CaptureOutcome, ClipboardManager};
 use crate::converter::Converter;
 use crate::db::Db;
 use crate::format::{format_copy_precise, format_display};
-use crate::history::HistoryItem;
+use crate::history::{HistoryItem, relative_age};
 use crate::hotkey;
 use crate::models::{
     self, Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo,
@@ -86,6 +86,9 @@ pub struct AppState {
     pub config_crypto_interval_str: String,
 
     pub history_tx: tokio::sync::mpsc::Sender<HistoryLogEntry>,
+
+    /// Signals the background runtime to wipe the history log file.
+    clear_history_tx: tokio::sync::mpsc::Sender<()>,
 
     /// Signals the background clipboard worker to capture the current selection.
     capture_req_tx: Sender<()>,
@@ -238,6 +241,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     // Channel for sending history log entries to the background runtime
     let (history_tx, mut history_rx) = tokio::sync::mpsc::channel::<HistoryLogEntry>(64);
+    let (clear_history_tx, mut clear_history_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let retention_days_startup = config.history_retention.to_days();
 
@@ -282,6 +286,15 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                         .await
                         {
                             error!(error = %err, "failed to append history entry");
+                        }
+                    }
+                });
+
+                // Clear-all receiver — wipes the history log off the UI thread
+                tokio::spawn(async move {
+                    while clear_history_rx.recv().await.is_some() {
+                        if let Err(err) = crate::history::clear_history().await {
+                            error!(error = %err, "failed to clear history log");
                         }
                     }
                 });
@@ -404,6 +417,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
                 history_tx,
+                clear_history_tx,
 
                 capture_req_tx,
                 capture_res_rx,
@@ -1038,6 +1052,12 @@ impl AppState {
                     self.persist_config();
                 }
             });
+            if ui.button("Clear All History").clicked() {
+                if self.clear_history_tx.try_send(()).is_err() {
+                    error!("failed to queue history clear");
+                }
+                self.recent_history.clear();
+            }
         }
 
         if ui.button("Open History Folder").clicked()
@@ -1550,6 +1570,13 @@ impl AppState {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Copy").clicked() {
                                 copy_idx = Some(idx);
+                            }
+                            if let Some(timestamp) = item.timestamp {
+                                ui.label(
+                                    egui::RichText::new(relative_age(timestamp))
+                                        .small()
+                                        .color(ui.visuals().weak_text_color()),
+                                );
                             }
                         });
                     });

@@ -264,6 +264,16 @@ mod tests {
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
+    /// Relative-tolerance float assertion: tolerance scales with magnitude so
+    /// large conversion results don't fail on accumulated rounding error.
+    fn assert_relative_eq(a: f64, b: f64) {
+        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= tolerance,
+            "expected {a} to equal {b} within relative tolerance"
+        );
+    }
+
     fn create_test_db() -> Db {
         let tmp_file = NamedTempFile::new().unwrap();
         let db_inner = Database::builder().create(tmp_file.path()).unwrap();
@@ -280,7 +290,7 @@ mod tests {
 
         let res = converter.convert(1.0, "m").unwrap();
         let cm = res.outputs.iter().find(|o| o.unit == "cm").unwrap();
-        assert!((cm.value - 100.0).abs() < f64::EPSILON);
+        assert_relative_eq(cm.value, 100.0);
     }
 
     #[test]
@@ -306,7 +316,7 @@ mod tests {
         let usd = res.outputs.iter().find(|o| o.unit == "USD").unwrap();
         // Target = (Base / Factor) - Offset
         // Target_USD = (10.0 / (1.0/1.1)) - 0 = 11.0
-        assert!((usd.value - 11.0).abs() < f64::EPSILON);
+        assert_relative_eq(usd.value, 11.0);
     }
 
     #[test]
@@ -318,12 +328,12 @@ mod tests {
         // 0 C to F
         let res = converter.convert(0.0, "C").unwrap();
         let f = res.outputs.iter().find(|o| o.unit == "F").unwrap();
-        assert!((f.value - 32.0).abs() < f64::EPSILON);
+        assert_relative_eq(f.value, 32.0);
 
         // 32 F to C
         let res = converter.convert(32.0, "F").unwrap();
         let c = res.outputs.iter().find(|o| o.unit == "C").unwrap();
-        assert!((c.value - 0.0).abs() < f64::EPSILON);
+        assert_relative_eq(c.value, 0.0);
     }
 
     #[test]
@@ -335,7 +345,7 @@ mod tests {
         // "meters" should resolve to "m"
         let res = converter.convert(1.0, "meters").unwrap();
         let cm = res.outputs.iter().find(|o| o.unit == "cm").unwrap();
-        assert!((cm.value - 100.0).abs() < f64::EPSILON);
+        assert_relative_eq(cm.value, 100.0);
     }
 
     #[test]
@@ -361,14 +371,14 @@ mod tests {
         // Target_PLN = 50000 / 0.25 = 200000
         let res = converter.convert(1.0, "BTC").unwrap();
         let pln = res.outputs.iter().find(|o| o.unit == "PLN").unwrap();
-        assert!((pln.value - 200_000.0).abs() < f64::EPSILON);
+        assert_relative_eq(pln.value, 200_000.0);
 
         // Convert 4 PLN to BTC
         // Base_EUR = 4 * 0.25 = 1.0
         // Target_BTC = 1.0 / 50000 = 0.00002
         let res = converter.convert(4.0, "PLN").unwrap();
         let btc = res.outputs.iter().find(|o| o.unit == "BTC").unwrap();
-        assert!((btc.value - 0.00002).abs() < f64::EPSILON);
+        assert_relative_eq(btc.value, 0.00002);
     }
 
     #[test]
@@ -449,7 +459,7 @@ mod tests {
             .convert_preferring(10.0, "EUR", Some("PLN"))
             .unwrap();
         assert_eq!(res.outputs[0].unit, "PLN");
-        assert!((res.outputs[0].value - 40.0).abs() < f64::EPSILON);
+        assert_relative_eq(res.outputs[0].value, 40.0);
         assert!(res.outputs.iter().any(|o| o.unit == "USD"));
     }
 

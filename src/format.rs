@@ -55,6 +55,22 @@ pub fn format_copy(value: f64) -> String {
     format_copy_precise(value, None)
 }
 
+/// Formats a value for the history log file (4 decimal places), falling back
+/// to the full float repr when rounding would erase the value entirely
+/// (e.g. tiny crypto amounts like `0.00001234 BTC`).
+#[must_use]
+pub fn format_history_value(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    let formatted = format!("{value:.4}");
+    if value != 0.0 && (formatted == "0.0000" || formatted == "-0.0000") {
+        format_copy_precise(value, None)
+    } else {
+        formatted
+    }
+}
+
 fn group_integer(integer: &str, separator: ThousandSeparator) -> String {
     let sep = match separator {
         ThousandSeparator::None => return integer.to_string(),
@@ -142,5 +158,25 @@ mod tests {
     #[test]
     fn copy_precision_handles_non_finite() {
         assert_eq!(format_copy_precise(f64::INFINITY, Some(2)), "inf");
+    }
+
+    #[test]
+    fn history_value_keeps_four_decimals_for_normal_values() {
+        assert_eq!(format_history_value(42.5), "42.5000");
+    }
+
+    #[test]
+    fn history_value_falls_back_to_full_repr_when_rounded_to_zero() {
+        assert_eq!(format_history_value(0.000_012_34), "0.00001234");
+    }
+
+    #[test]
+    fn history_value_falls_back_to_full_repr_for_negative_tiny_values() {
+        assert_eq!(format_history_value(-0.000_01), "-0.00001");
+    }
+
+    #[test]
+    fn history_value_keeps_zero_as_zero() {
+        assert_eq!(format_history_value(0.0), "0.0000");
     }
 }

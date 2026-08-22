@@ -1,3 +1,4 @@
+use crate::format::format_history_value;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
@@ -14,6 +15,7 @@ const PRUNE_MARKER_NAME: &str = ".history_pruned";
 /// A parsed history log entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryItem {
+    pub timestamp: Option<DateTime<Utc>>,
     pub input_value: f64,
     pub input_unit: String,
     pub output_value: f64,
@@ -54,15 +56,40 @@ fn parse_history_line(line: &str) -> Option<HistoryItem> {
     let left = rest[..arrow_idx].trim();
     let right = rest[arrow_idx + 2..].trim();
 
+    let timestamp = line[1..pipe_idx]
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<DateTime<Utc>>()
+        .ok();
+
     let (input_value, input_unit) = split_value_unit(left)?;
     let (output_value, output_unit) = split_value_unit(right)?;
 
     Some(HistoryItem {
+        timestamp,
         input_value,
         input_unit,
         output_value,
         output_unit,
     })
+}
+
+/// Human-readable relative age of a history entry, bucketed by magnitude:
+/// seconds collapse to "just now", then minutes, hours, and days.
+#[must_use]
+pub fn relative_age(timestamp: DateTime<Utc>) -> String {
+    let elapsed = Utc::now() - timestamp;
+    let secs = elapsed.num_seconds().max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 60 * 60 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 60 * 60 * 24 {
+        format!("{}h ago", secs / (60 * 60))
+    } else {
+        format!("{}d ago", secs / (60 * 60 * 24))
+    }
 }
 
 fn split_value_unit(part: &str) -> Option<(f64, String)> {
@@ -93,7 +120,9 @@ pub async fn log_conversion(
 
     let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let entry = format!(
-        "[{timestamp}] | {input_value:.4} {input_unit} -> {output_value:.4} {output_unit}\n"
+        "[{timestamp}] | {} {input_unit} -> {} {output_unit}\n",
+        format_history_value(input_value),
+        format_history_value(output_value),
     );
 
     append_entry(&path, &entry).await
@@ -246,6 +275,49 @@ async fn prune_history_atomic(path: &Path, days: i64) -> Result<()> {
     Ok(())
 }
 
+/// Wipes the entire history log.
+///
+/// Uses the same crash-safe temp-file + rename pattern as
+/// [`prune_history_atomic`] so an interrupted clear can never leave a
+/// half-written log behind. A missing history file is treated as already clear.
+///
+/// # Errors
+/// Returns an error if creating the empty replacement file or renaming it
+/// over the original fails.
+pub async fn clear_history() -> Result<()> {
+    let path = get_history_path()?;
+    clear_history_at(&path).await
+}
+
+/// Testable core of [`clear_history`], parameterized over an explicit path so
+/// the wipe behavior can be exercised against a temp directory in tests.
+async fn clear_history_at(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(
+        "history.{}.tmp",
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+
+    tokio::fs::File::create(&temp_path)
+        .await
+        .with_context(|| format!("Failed to create temp history at {}", temp_path.display()))?;
+
+    if let Err(err) = tokio::fs::rename(&temp_path, path).await {
+        warn!(
+            error = %err,
+            temp = %temp_path.display(),
+            "atomic history rename failed; leaving original intact"
+        );
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(err).context("Failed to replace history log atomically");
+    }
+
+    Ok(())
+}
+
 /// Helper to get the path to the history log file.
 ///
 /// # Errors
@@ -261,6 +333,15 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
+    /// Relative-tolerance float assertion for test expectations.
+    fn assert_relative_eq(a: f64, b: f64) {
+        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= tolerance,
+            "expected {a} to equal {b} within relative tolerance"
+        );
+    }
+
     #[tokio::test]
     async fn test_log_conversion_path() {
         let path = get_history_path();
@@ -272,10 +353,51 @@ mod tests {
     fn test_parse_history_line() {
         let line = "[2024-04-23T10:00:00Z] | 42.5000 kg -> 93.7000 lb";
         let item = parse_history_line(line).unwrap();
-        assert!((item.input_value - 42.5).abs() < f64::EPSILON);
+        assert_relative_eq(item.input_value, 42.5);
         assert_eq!(item.input_unit, "kg");
-        assert!((item.output_value - 93.7).abs() < f64::EPSILON);
+        assert_relative_eq(item.output_value, 93.7);
         assert_eq!(item.output_unit, "lb");
+    }
+
+    #[test]
+    fn parse_history_line_should_keep_timestamp_when_present() {
+        let line = "[2024-04-23T10:00:00Z] | 42.5000 kg -> 93.7000 lb";
+        let item = parse_history_line(line).unwrap();
+        let expected = DateTime::parse_from_rfc3339("2024-04-23T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(item.timestamp, Some(expected));
+    }
+
+    #[test]
+    fn parse_history_line_should_drop_unparseable_timestamp() {
+        let line = "[not-a-date] | 9.9999 x -> 9.9999 y";
+        let item = parse_history_line(line).unwrap();
+        assert_eq!(item.timestamp, None);
+    }
+
+    #[test]
+    fn relative_age_should_report_just_now_within_a_minute() {
+        let ts = Utc::now() - chrono::Duration::seconds(30);
+        assert_eq!(relative_age(ts), "just now");
+    }
+
+    #[test]
+    fn relative_age_should_report_minutes_under_an_hour() {
+        let ts = Utc::now() - chrono::Duration::minutes(5);
+        assert_eq!(relative_age(ts), "5m ago");
+    }
+
+    #[test]
+    fn relative_age_should_report_hours_under_a_day() {
+        let ts = Utc::now() - chrono::Duration::hours(2);
+        assert_eq!(relative_age(ts), "2h ago");
+    }
+
+    #[test]
+    fn relative_age_should_report_days_beyond_a_day() {
+        let ts = Utc::now() - chrono::Duration::days(3);
+        assert_eq!(relative_age(ts), "3d ago");
     }
 
     #[test]
@@ -365,6 +487,38 @@ mod tests {
         assert_eq!(contents.lines().count(), 5);
         // Earliest entry is still present untouched — appends never prune.
         assert!(contents.contains("0.0000 kg -> 0.0000 lb"));
+    }
+
+    #[tokio::test]
+    async fn clear_history_at_should_empty_the_log_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[2024-04-23T10:00:00Z] | 1.0000 m -> 3.2808 ft\n[2024-04-24T10:00:00Z] | 2.0000 kg -> 4.4092 lb\n",
+        )
+        .unwrap();
+
+        clear_history_at(&path).await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.is_empty());
+
+        // The atomic wipe must not leave any leftover temp files behind.
+        let mut read_dir = tokio::fs::read_dir(dir.path()).await.unwrap();
+        while let Some(entry) = read_dir.next_entry().await.unwrap() {
+            assert!(!entry.file_name().to_string_lossy().ends_with(".tmp"));
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_history_at_should_succeed_when_log_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+
+        clear_history_at(&path).await.unwrap();
+
+        assert!(!path.exists());
     }
 
     #[tokio::test]

@@ -1010,6 +1010,16 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Relative-tolerance float assertion: tolerance scales with magnitude so
+    /// tiny stored factors (e.g. 1/50000) don't fail on rounding error.
+    fn assert_relative_eq(a: f64, b: f64) {
+        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= tolerance,
+            "expected {a} to equal {b} within relative tolerance"
+        );
+    }
+
     #[test]
     fn test_db_update_priority() {
         let tmp_file = NamedTempFile::new().unwrap();
@@ -1025,7 +1035,7 @@ mod tests {
             .unwrap();
         let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Fiat as u8);
-        assert!((entry.factor - (1.0 / 50000.0)).abs() < f64::EPSILON);
+        assert_relative_eq(entry.factor, 1.0 / 50000.0);
 
         // 2. Insert Crypto rate (Higher priority)
         // 1 BTC = 51000 EUR
@@ -1063,14 +1073,14 @@ mod tests {
         assert_eq!(updated, 3);
 
         let usd = db.get_unit("USD").unwrap().unwrap();
-        assert!((usd.factor - (1.0 / 1.08)).abs() < f64::EPSILON);
+        assert_relative_eq(usd.factor, 1.0 / 1.08);
         assert_eq!(usd.source, RateSource::Fiat as u8);
 
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - 0.25).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 0.25);
 
         let gbp = db.get_unit("GBP").unwrap().unwrap();
-        assert!((gbp.factor - (1.0 / 0.85)).abs() < f64::EPSILON);
+        assert_relative_eq(gbp.factor, 1.0 / 0.85);
     }
 
     #[test]
@@ -1121,7 +1131,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         let ok = db.get_unit("OK").unwrap().unwrap();
-        assert!((ok.factor - 0.4).abs() < f64::EPSILON);
+        assert_relative_eq(ok.factor, 0.4);
         assert!(db.get_unit("NEG").unwrap().is_none());
         assert!(db.get_unit("NAN").unwrap().is_none());
         assert!(db.get_unit("INF").unwrap().is_none());
@@ -1170,7 +1180,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 1);
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 1.0 / 4.5);
 
         // Older timestamp, same source: should be skipped.
         let updated = db
@@ -1178,7 +1188,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 0);
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 1.0 / 4.5);
     }
 
     #[test]
@@ -1397,7 +1407,7 @@ mod tests {
         assert!(updated.is_ok());
         let btc = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(btc.source, RateSource::Fiat as u8);
-        assert!((btc.factor - (1.0 / 48_000.0)).abs() < f64::EPSILON);
+        assert_relative_eq(btc.factor, 1.0 / 48_000.0);
     }
 
     #[test]
@@ -1442,7 +1452,7 @@ mod tests {
 
         let f = db.get_unit("F").unwrap().unwrap();
         assert_eq!(f.category, UnitCategory::Temperature as u8);
-        assert!((f.factor - 5.0 / 9.0).abs() < f64::EPSILON);
+        assert_relative_eq(f.factor, 5.0 / 9.0);
         assert_eq!(f.offset, -32.0);
 
         let litre = db.get_unit("L").unwrap().unwrap();
@@ -1459,12 +1469,12 @@ mod tests {
 
         db.update_unit("m", 99.0, 0.0, UnitCategory::Length, RateSource::Static)
             .unwrap();
-        assert!((db.get_unit("m").unwrap().unwrap().factor - 99.0).abs() < f64::EPSILON);
+        assert_relative_eq(db.get_unit("m").unwrap().unwrap().factor, 99.0);
 
         db.init_static_units().unwrap();
 
         let metres = db.get_unit("m").unwrap().unwrap();
-        assert!((metres.factor - 1.0).abs() < f64::EPSILON);
+        assert_relative_eq(metres.factor, 1.0);
         assert_eq!(db.resolve_symbol("meters").unwrap(), "m");
         assert!(db.get_unit("L").unwrap().is_some());
     }
@@ -1484,6 +1494,6 @@ mod tests {
         db.init_static_units().unwrap();
 
         let metres = db.get_unit("m").unwrap().unwrap();
-        assert!((metres.factor - 99.0).abs() < f64::EPSILON);
+        assert_relative_eq(metres.factor, 99.0);
     }
 }
