@@ -52,9 +52,18 @@
               <File
                 Id="ClippyConverterExe"
                 Name="clippy-converter.exe"
-                Source="$(var.ExePath)"
-                KeyPath="yes" />
+                Source="$(var.ExePath)" />
               <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+              <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+              <!-- Per-user components must be keyed on HKCU (ICE38); the file
+                   alone cannot be the KeyPath inside the user profile. -->
+              <RegistryValue
+                Root="HKCU"
+                Key="Software\clippy-converter\Clippy Converter"
+                Name="MainExecutablePath"
+                Type="string"
+                Value="[INSTALLFOLDER]clippy-converter.exe"
+                KeyPath="yes" />
             </Component>
           </Directory>
         </Directory>
