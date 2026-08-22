@@ -34,6 +34,12 @@ fn init_tracing() {
 fn main() -> Result<()> {
     init_tracing();
 
+    if models::is_portable_mode() {
+        info!("portable mode: config and database resolve next to the executable");
+    } else {
+        info!("standard mode: config and database resolve under the user profile");
+    }
+
     // Ensure only one instance is running
     let instance = SingleInstance::new("com.clippy.clippy-converter")
         .context("Failed to create single instance lock")?;
