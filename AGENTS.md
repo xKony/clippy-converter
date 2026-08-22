@@ -83,6 +83,7 @@
 - **UI Config:** egui Window uses `decorations: false` and `AlwaysOnTop` via `ViewportBuilder`; vsync is on.
 
 ## 8. Development conventions
+- **Rust best practices:** Always load and follow the `rust-best-practices` skill when writing, reviewing, or refactoring Rust code in this repo (Apollo GraphQL handbook: borrowing vs cloning, error handling via `Result`/`thiserror`/`anyhow`, clippy-driven linting, descriptive test names, static dispatch).
 - **Naming conventions:** Standard Rust `snake_case` for functions/variables, `PascalCase` for types.
 - **Error Handling:** Pervasive use of `anyhow::Result` and `.context()` for descriptive error bubbling; prefer `tracing::{error,warn}` over silent `let _ =` at call sites.
 - **Documentation:** Modules and functions use standard Rust doc comments (`///`).
