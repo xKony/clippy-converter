@@ -9,13 +9,13 @@
 ## 2. Exact versions
 - **Runtime:** Rust Edition 2024
 - **Package Manager:** Cargo
-- **Framework:** egui 0.34.1 / eframe 0.34.1
+- **Framework:** egui 0.36.1 / eframe 0.36.1
 - **Language:** Rust 2024
 - **Dependencies:**
   - `anyhow`: 1.0
-  - `eframe`: 0.34.1 (features: ["glow"])
-  - `egui`: 0.34.1
-  - `egui_extras`: 0.34.1 (features: ["svg"])
+  - `eframe`: 0.36.1 (features: ["glow", "inspection"])
+  - `egui`: 0.36.1
+  - `egui_extras`: 0.36.1 (features: ["svg"])
   - `image`: 0.25 (features: ["ico", "png"]; already transitive via arboard/eframe)
   - `global-hotkey`: 0.7.0
   - `arboard`: 3.4

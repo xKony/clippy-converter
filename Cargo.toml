@@ -31,9 +31,9 @@ chrono = { version = "0.4", features = ["serde"] }
 tray-icon = "0.19"
 open = "5.3"
 single-instance = "0.3.3"
-eframe = { version = "0.34.1", features = ["glow"] }
-egui = "0.34.1"
-egui_extras = { version = "0.34.1", features = ["svg"] }
+eframe = { version = "0.36.1", features = ["glow", "inspection"] }
+egui = "0.36.1"
+egui_extras = { version = "0.36.1", features = ["svg"] }
 # Reads the native HWND so placement.rs can request DWM-rounded corners.
 raw-window-handle = "0.6"
 # Decodes icons/clippy-converter_icon.ico for the tray; already in the tree

@@ -188,8 +188,12 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_resizable(false)
             .with_inner_size([330.0, 400.0]),
         run_and_return: false,
-        vsync: true,
-        hardware_acceleration: eframe::HardwareAcceleration::Required,
+        // vsync stays on (GlowConfiguration default); keep hardware
+        // acceleration required so we never fall back to a software GL path.
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            hardware_acceleration: eframe::egui_glow::HardwareAcceleration::Required,
+            ..Default::default()
+        },
         // Glow (OpenGL) instead of Wgpu: the DX12 backend wgpu selects on
         // Windows allocates ~200+ MB of GPU memory pools for this tiny popup.
         renderer: eframe::Renderer::Glow,
