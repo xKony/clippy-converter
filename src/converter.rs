@@ -1,7 +1,8 @@
 use crate::db::Db;
 use crate::models::{Config, ConversionResult, ConvertedValue, UnitInfo};
-use crate::parser::ParsedInput;
+use crate::parser::{ParsedInput, ResolvedZone, WallClock, resolve_zone};
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, FixedOffset, Local, Offset, TimeZone, Timelike, Utc};
 
 /// A unit with precomputed lowercase forms so search never allocates per query.
 #[derive(Debug, Clone)]
@@ -237,12 +238,19 @@ impl Converter {
     }
 
     /// Converts a parser result, emitting one row per endpoint when a range
-    /// (`10-20 USD`, `10 to 20 km`) was detected, otherwise behaving exactly
+    /// (`10-20 USD`, `10 to 20 km`) was detected, behaving like the timezone
+    /// branch when a wall-clock payload is present, and otherwise exactly
     /// like [`Self::convert_preferring`].
     ///
     /// # Errors
     /// Returns an error when no source unit is present or if the conversion fails.
     pub fn convert_parsed(&self, parsed: &ParsedInput) -> Result<ConversionResult> {
+        if let Some(moment) = &parsed.wall_clock {
+            // Wall-clock inputs always carry their raw text in `unit` so the
+            // popup header can echo them; fall back defensively regardless.
+            let input_text = parsed.unit.as_deref().unwrap_or("datetime");
+            return Self::convert_wall_clock(moment, input_text, parsed.target.as_deref());
+        }
         let Some(unit) = parsed.unit.as_deref() else {
             return Err(anyhow!("parsed input carries no source unit"));
         };
@@ -251,6 +259,147 @@ impl Converter {
             |end| self.convert_range_preferring(parsed.value, end, unit, parsed.target.as_deref()),
         )
     }
+
+    /// Renders a wall-clock moment as formatted datetime rows.
+    ///
+    /// Every row's `value` stays the Unix epoch so Enter/copy yields a number
+    /// (the epoch for datetime sources), while the `unit` label carries the
+    /// human-readable rendering like `2026-08-21 19:30 (local, CEST)`. Rows
+    /// are ordered explicit-target first (like [`Self::convert_preferring`]
+    /// pins currencies), then the OS-local zone, then a UTC reference.
+    fn convert_wall_clock(
+        moment: &WallClock,
+        input_text: &str,
+        prefer: Option<&str>,
+    ) -> Result<ConversionResult> {
+        let epoch = moment.epoch_seconds;
+        let utc_moment = Utc
+            .timestamp_opt(epoch, 0)
+            .single()
+            .ok_or_else(|| anyhow!("Time out of representable range: {epoch}"))?;
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "epoch seconds stay far below f64's exact-integer range"
+        )]
+        let epoch_value = epoch as f64;
+
+        let mut outputs: Vec<ConvertedValue> = Vec::new();
+        if let Some(target) = prefer.filter(|zone| !zone.is_empty()) {
+            match resolve_zone(target) {
+                Some(ResolvedZone::Utc) => {
+                    outputs.push(utc_reference_row(epoch_value, &utc_moment));
+                }
+                Some(ResolvedZone::Fixed(offset)) => {
+                    let rendered = utc_moment.with_timezone(&offset);
+                    // The suffix is the offset itself; `%Z` would just echo it.
+                    outputs.push(datetime_row(
+                        epoch_value,
+                        &moment_label(&rendered),
+                        &offset_label(offset),
+                    ));
+                }
+                Some(ResolvedZone::Tz(zone)) => {
+                    let rendered = utc_moment.with_timezone(&zone);
+                    outputs.push(datetime_row(
+                        epoch_value,
+                        &moment_label(&rendered),
+                        &zone_suffix(&rendered, zone.name()),
+                    ));
+                }
+                // `resolve_zone` never produces `Local`; anything unresolved
+                // is a user-facing unknown-zone error.
+                Some(ResolvedZone::Local) | None => {
+                    return Err(anyhow!("Unknown timezone: {target}"));
+                }
+            }
+        }
+
+        let rendered_local = utc_moment.with_timezone(&Local);
+        outputs.push(datetime_row(
+            epoch_value,
+            &moment_label(&rendered_local),
+            &zone_suffix(&rendered_local, "local"),
+        ));
+        outputs.push(utc_reference_row(epoch_value, &utc_moment));
+
+        // Collapse identical renderings regardless of position (an explicit
+        // UTC target sits rows away from the trailing reference row); the
+        // first occurrence wins so pinned targets keep their spot.
+        let mut collapsed: Vec<ConvertedValue> = Vec::with_capacity(outputs.len());
+        for row in outputs {
+            if !collapsed.iter().any(|kept| kept.unit == row.unit) {
+                collapsed.push(row);
+            }
+        }
+
+        Ok(ConversionResult {
+            input_value: epoch_value,
+            input_unit: input_text.to_string(),
+            outputs: collapsed,
+        })
+    }
+}
+
+/// Builds one datetime row from its preformatted wall clock and zone suffix.
+fn datetime_row(value: f64, moment: &str, suffix: &str) -> ConvertedValue {
+    ConvertedValue {
+        value,
+        unit: format!("{moment} ({suffix})"),
+    }
+}
+
+/// The UTC reference row shared by pinned targets and the trailing default.
+fn utc_reference_row(epoch: f64, utc_moment: &DateTime<Utc>) -> ConvertedValue {
+    ConvertedValue {
+        value: epoch,
+        unit: format!("{} (UTC)", moment_label(utc_moment)),
+    }
+}
+
+/// Formats the wall clock of a rendered datetime, seconds only when nonzero.
+fn moment_label<Z>(rendered: &DateTime<Z>) -> String
+where
+    Z: TimeZone,
+    Z::Offset: std::fmt::Display,
+{
+    let base = rendered.format("%Y-%m-%d %H:%M").to_string();
+    if rendered.second() == 0 {
+        base
+    } else {
+        format!("{base}:{}", rendered.format("%S"))
+    }
+}
+
+/// Composes a row suffix such as `local, CEST` or `Europe/Warsaw, CET`.
+///
+/// `%Z` abbreviations are platform-opaque for `Local` (often empty or an
+/// offset on Windows), so anything empty or offset-shaped falls back to the
+/// numeric offset which is always available from chrono itself.
+fn zone_suffix<Z>(rendered: &DateTime<Z>, zone_label: &str) -> String
+where
+    Z: TimeZone,
+    Z::Offset: std::fmt::Display,
+{
+    let abbreviation = rendered.format("%Z").to_string();
+    let tag = if abbreviation.is_empty() || abbreviation.starts_with(['+', '-']) {
+        offset_label(rendered.offset().fix())
+    } else {
+        abbreviation
+    };
+    format!("{zone_label}, {tag}")
+}
+
+/// Formats a fixed offset as `UTC+05:30` / `UTC-08:00`.
+fn offset_label(offset: FixedOffset) -> String {
+    let seconds = offset.local_minus_utc();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let absolute = seconds.abs();
+    format!(
+        "UTC{sign}{:02}:{:02}",
+        absolute / 3600,
+        absolute % 3600 / 60
+    )
 }
 
 /// Matches an ASCII prefix table against `input`.
@@ -315,7 +464,13 @@ fn extract_metric_prefix(input: &str) -> Option<(f64, &str)> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::float_cmp,
+        // Test epochs are small enough to be exact in f64.
+        clippy::cast_precision_loss
+    )]
     use super::*;
     use crate::models::{RateSource, UnitCategory};
     use redb::Database;
@@ -623,6 +778,7 @@ mod tests {
             end_value: Some(20.0),
             unit: Some("USD".to_string()),
             target: None,
+            wall_clock: None,
         };
         let res = converter.convert_parsed(&parsed).unwrap();
 
@@ -686,6 +842,7 @@ mod tests {
             end_value: Some(1.0),
             unit: Some("m".to_string()),
             target: None,
+            wall_clock: None,
         };
         let res = converter.convert_parsed(&parsed).unwrap();
 
@@ -705,6 +862,7 @@ mod tests {
             end_value: None,
             unit: None,
             target: None,
+            wall_clock: None,
         };
         assert!(converter.convert_parsed(&parsed).is_err());
     }
@@ -720,7 +878,185 @@ mod tests {
             end_value: Some(2.0),
             unit: Some("not-a-unit".to_string()),
             target: None,
+            wall_clock: None,
         };
         assert!(converter.convert_parsed(&parsed).is_err());
+    }
+
+    /// 2026-01-15 12:00:00 UTC: northern-hemisphere winter, so fixed-offset
+    /// expectations (CET +1, PST -8) are immune to DST politics.
+    fn winter_noon_utc_epoch() -> i64 {
+        Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    fn wall_clock_parsed(epoch_seconds: i64, target: Option<&str>) -> ParsedInput {
+        ParsedInput {
+            value: epoch_seconds as f64,
+            end_value: None,
+            unit: Some("2026-01-15T12:00Z".to_string()),
+            target: target.map(str::to_string),
+            wall_clock: Some(WallClock {
+                epoch_seconds,
+                source_zone: ResolvedZone::Utc,
+            }),
+        }
+    }
+
+    #[test]
+    fn wall_clock_should_render_local_row_using_os_timezone() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let epoch = winter_noon_utc_epoch();
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(epoch, None))
+            .unwrap();
+
+        // Anchor the assertion to chrono's own Local conversion instead of a
+        // hardcoded zone so the test holds on any machine timezone.
+        let expected_local = Utc
+            .timestamp_opt(epoch, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Local);
+        let want_prefix = expected_local.format("%Y-%m-%d %H:%M").to_string();
+        let local_row = res
+            .outputs
+            .iter()
+            .find(|row| row.unit.contains("local"))
+            .unwrap();
+        assert!(local_row.unit.contains(&want_prefix), "{}", local_row.unit);
+    }
+
+    #[test]
+    fn wall_clock_should_pin_explicit_iana_target_first() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(
+                winter_noon_utc_epoch(),
+                Some("Europe/Warsaw"),
+            ))
+            .unwrap();
+
+        assert_eq!(res.outputs.len(), 3);
+        assert_eq!(res.outputs[0].value, winter_noon_utc_epoch() as f64);
+        // 12:00 UTC == 13:00 CET in January.
+        assert!(res.outputs[0].unit.contains("2026-01-15 13:00"));
+        assert!(res.outputs[0].unit.contains("Europe/Warsaw"));
+        assert!(res.outputs[1].unit.contains("local"));
+        assert!(res.outputs[2].unit.ends_with("(UTC)"));
+    }
+
+    #[test]
+    fn wall_clock_should_map_pst_abbreviation_to_a_representative_zone() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(winter_noon_utc_epoch(), Some("pst")))
+            .unwrap();
+
+        // 12:00 UTC == 04:00 Pacific standard time; lowercase input too.
+        assert!(
+            res.outputs[0].unit.contains("2026-01-15 04:00"),
+            "{}",
+            res.outputs[0].unit
+        );
+        assert!(res.outputs[0].unit.contains("America/Los_Angeles"));
+    }
+
+    #[test]
+    fn wall_clock_should_apply_fixed_offset_target() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(winter_noon_utc_epoch(), Some("+05:30")))
+            .unwrap();
+
+        assert!(
+            res.outputs[0].unit.contains("2026-01-15 17:30"),
+            "{}",
+            res.outputs[0].unit
+        );
+        assert!(res.outputs[0].unit.contains("(UTC+05:30)"));
+    }
+
+    #[test]
+    fn wall_clock_should_error_for_unknown_target_zone() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let error = converter
+            .convert_parsed(&wall_clock_parsed(
+                winter_noon_utc_epoch(),
+                Some("Mars/Olympus"),
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("Unknown timezone"), "{error}");
+    }
+
+    #[test]
+    fn wall_clock_should_carry_the_epoch_on_every_row_for_copy() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let epoch = winter_noon_utc_epoch();
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(epoch, None))
+            .unwrap();
+
+        // Enter/copy reads `ConvertedValue.value`, so datetime sources hand
+        // back the epoch through the normal numeric copy path.
+        assert!(res.outputs.iter().all(|row| row.value == epoch as f64));
+        assert_eq!(res.input_value, epoch as f64);
+        assert_eq!(res.input_unit, "2026-01-15T12:00Z");
+    }
+
+    #[test]
+    fn convert_parsed_should_dispatch_wall_clock_without_unit_text() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let parsed = ParsedInput {
+            value: 0.0,
+            end_value: None,
+            unit: None,
+            target: None,
+            wall_clock: Some(WallClock {
+                epoch_seconds: winter_noon_utc_epoch(),
+                source_zone: ResolvedZone::Utc,
+            }),
+        };
+        let res = converter.convert_parsed(&parsed).unwrap();
+        assert!(res.outputs.len() >= 2);
+    }
+
+    #[test]
+    fn wall_clock_should_collapse_duplicate_rows_when_target_is_utc() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let res = converter
+            .convert_parsed(&wall_clock_parsed(winter_noon_utc_epoch(), Some("UTC")))
+            .unwrap();
+
+        // Pinned UTC row and the trailing reference row merge into one.
+        assert_eq!(res.outputs.len(), 2);
+        assert!(res.outputs.iter().any(|row| row.unit.ends_with("(UTC)")));
+        assert!(res.outputs.iter().any(|row| row.unit.contains("local")));
     }
 }

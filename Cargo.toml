@@ -28,6 +28,9 @@ redb = "4.1.0"
 bincode = "1.3.3"
 directories = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
+# Compile-time IANA tables for wall-clock conversion (#14); `case-insensitive`
+# lets `europe/warsaw` resolve the same as `Europe/Warsaw`.
+chrono-tz = { version = "0.10", features = ["case-insensitive"] }
 tray-icon = "0.19"
 open = "5.3"
 single-instance = "0.3.3"
