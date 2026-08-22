@@ -1277,7 +1277,10 @@ impl AppState {
                 };
 
                 let enter = self.step_list_cursor(ui, outputs.len());
-                if enter && let Some(output) = outputs.get(self.list_cursor) {
+                if enter
+                    && let Some(output) = outputs.get(self.list_cursor)
+                    && output.value.is_finite()
+                {
                     self.copy_value_to_clipboard(ctx, output.value, true);
                 }
 
@@ -1390,21 +1393,46 @@ impl AppState {
                                                             self.focus_main_input = true;
                                                         }
 
-                                                        if ui
-                                                            .add(egui::Button::image(
-                                                                egui::Image::new(
-                                                                    egui::include_image!(
-                                                                        "../icons/copy.svg"
+                                                        if output.value.is_finite() {
+                                                            if ui
+                                                                .add(
+                                                                    egui::Button::image(
+                                                                        egui::Image::new(
+                                                                            egui::include_image!(
+                                                                                "../icons/copy.svg"
+                                                                            ),
+                                                                        )
+                                                                        .tint(
+                                                                            ui.visuals()
+                                                                                .text_color(),
+                                                                        ),
                                                                     ),
                                                                 )
-                                                                .tint(ui.visuals().text_color()),
-                                                            ))
-                                                            .clicked()
-                                                        {
-                                                            self.copy_value_to_clipboard(
-                                                                ctx,
-                                                                output.value,
+                                                                .clicked()
+                                                            {
+                                                                self.copy_value_to_clipboard(
+                                                                    ctx,
+                                                                    output.value,
+                                                                    false,
+                                                                );
+                                                            }
+                                                        } else {
+                                                            // Non-copyable value (inf/NaN):
+                                                            // render a disabled, dimmed
+                                                            // control instead of a live
+                                                            // button, so accidental
+                                                            // clicks while scrolling the
+                                                            // list cannot trigger the
+                                                            // red "Invalid value" toast.
+                                                            ui.add_enabled(
                                                                 false,
+                                                                egui::Button::image(
+                                                                    egui::Image::new(
+                                                                        egui::include_image!(
+                                                                            "../icons/copy.svg"
+                                                                        ),
+                                                                    ),
+                                                                ),
                                                             );
                                                         }
                                                     },
