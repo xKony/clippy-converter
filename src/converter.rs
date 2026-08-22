@@ -104,6 +104,24 @@ impl Converter {
         Ok(self.units_cache.as_deref().unwrap_or(&[]))
     }
 
+    /// Returns `true` when `symbol` (or an alias) resolves to a known
+    /// currency unit.
+    ///
+    /// Database read failures count as "unknown": callers only gate optional
+    /// behavior (default-target pinning) on this, and the real conversion
+    /// path surfaces any genuine database error itself.
+    #[must_use]
+    pub fn is_currency_unit(&self, symbol: &str) -> bool {
+        let Ok(resolved) = self.db.resolve_symbol(symbol) else {
+            return false;
+        };
+        self.db
+            .get_unit(&resolved)
+            .ok()
+            .flatten()
+            .is_some_and(|entry| entry.category == crate::models::UnitCategory::Currency as u8)
+    }
+
     /// Converts a numeric value from one unit to all compatible target units.
     ///
     /// # Errors
@@ -702,6 +720,50 @@ mod tests {
 
         // Mixed case too.
         let res = converter.convert(1.0, "Eur").unwrap();
+        assert!(res.outputs.iter().any(|o| o.unit == "USD"));
+    }
+
+    #[test]
+    fn is_currency_unit_should_recognize_codes_case_insensitively() {
+        let db = create_test_db();
+        db.update_unit("USD", 0.5, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        let converter = Converter::new(Config::default(), db);
+
+        assert!(converter.is_currency_unit("USD"));
+        assert!(converter.is_currency_unit("usd"));
+    }
+
+    #[test]
+    fn is_currency_unit_should_reject_non_currencies_and_unknown_symbols() {
+        let db = create_test_db();
+        let converter = Converter::new(Config::default(), db);
+
+        assert!(!converter.is_currency_unit("m"));
+        assert!(!converter.is_currency_unit("zzzz"));
+    }
+
+    #[test]
+    fn convert_preferring_should_treat_unknown_preferred_units_as_no_target() {
+        let config = Config::default();
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+        let converter = Converter::new(config, db);
+
+        // The default-target setting may hold a code that no longer resolves;
+        // conversions must then behave exactly like an unpinned one.
+        let res = converter
+            .convert_preferring(10.0, "EUR", Some("ZZZZ"))
+            .unwrap();
         assert!(res.outputs.iter().any(|o| o.unit == "USD"));
     }
 

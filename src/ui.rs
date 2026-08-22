@@ -84,6 +84,9 @@ pub struct AppState {
 
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
+    /// Edit buffer for the default-currency-target setting; committed to the
+    /// config on focus loss like the interval strings above.
+    pub config_currency_target_str: String,
 
     pub history_tx: tokio::sync::mpsc::Sender<HistoryLogEntry>,
 
@@ -166,6 +169,21 @@ fn apply_settings_viewport(ctx: &egui::Context) {
     });
 }
 
+/// Decides whether the default-currency-target setting applies to a parse
+/// result: only when the input carries no explicit target, is not a wall
+/// clock (whose target slot selects a timezone), and its source unit is a
+/// currency. Explicit targets always win.
+fn default_currency_pin(
+    config_code: Option<&str>,
+    parsed: &crate::parser::ParsedInput,
+    source_is_currency: bool,
+) -> Option<String> {
+    if parsed.target.is_some() || parsed.wall_clock.is_some() || !source_is_currency {
+        return None;
+    }
+    config_code.map(str::to_string)
+}
+
 /// Runs the eframe application.
 ///
 /// # Errors
@@ -228,6 +246,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let fiat_str = config.fiat_update_interval_mins.to_string();
     let crypto_str = config.crypto_update_interval_mins.to_string();
+    let currency_target_str = config.default_currency_target.clone().unwrap_or_default();
 
     let (tx, rx) = mpsc::channel();
 
@@ -420,6 +439,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
+                config_currency_target_str: currency_target_str,
                 history_tx,
                 clear_history_tx,
 
@@ -682,6 +702,13 @@ impl AppState {
         }
     }
 
+    /// Commits the default-currency-target text field into the config;
+    /// invalid codes fall back to off inside [`models::sanitize_currency_target`].
+    fn apply_default_currency_target(&mut self) {
+        self.config.default_currency_target =
+            models::sanitize_currency_target(Some(&self.config_currency_target_str));
+    }
+
     fn log_conversion_if_enabled(&self) {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
@@ -869,7 +896,11 @@ impl AppState {
             return;
         };
 
-        if let Ok(result) = self.converter.convert_parsed(parsed) {
+        let patched = self.patched_with_default_currency_target(parsed);
+        if let Ok(result) = self
+            .converter
+            .convert_parsed(patched.as_ref().unwrap_or(parsed))
+        {
             self.current_result = Some(result);
             self.current_mode = WindowMode::Results;
             self.log_conversion_if_enabled();
@@ -879,6 +910,36 @@ impl AppState {
             self.current_result = None;
             self.current_mode = WindowMode::SourceUnitSelection;
         }
+    }
+
+    /// Clones-and-patches `parsed` when the default-currency-target setting
+    /// should act like a typed `to <code>` clause. The decision lives here
+    /// rather than inside `Converter` because every input it needs (the
+    /// setting plus the DB-backed category lookups) is already available on
+    /// `AppState`, keeping the converter's range and wall-clock paths
+    /// untouched. A configured code that is not a known currency is ignored
+    /// with one warning instead of failing every conversion.
+    fn patched_with_default_currency_target(
+        &self,
+        parsed: &crate::parser::ParsedInput,
+    ) -> Option<crate::parser::ParsedInput> {
+        let source_is_currency = parsed
+            .unit
+            .as_deref()
+            .is_some_and(|unit| self.converter.is_currency_unit(unit));
+        let code = default_currency_pin(
+            self.config.default_currency_target.as_deref(),
+            parsed,
+            source_is_currency,
+        )?;
+        if !self.converter.is_currency_unit(&code) {
+            warn!(code = %code, "default currency target does not name a known currency; ignoring");
+            return None;
+        }
+
+        let mut pinned = parsed.clone();
+        pinned.target = Some(code);
+        Some(pinned)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1117,9 +1178,28 @@ impl AppState {
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Default currency target:");
+            let target = ui.add(
+                egui::TextEdit::singleline(&mut self.config_currency_target_str)
+                    .hint_text("e.g. PLN (off when empty)")
+                    .desired_width(96.0),
+            );
+            if target.lost_focus() {
+                self.apply_default_currency_target();
+                self.persist_config();
+            }
+        });
+        ui.label(
+            egui::RichText::new("Currencies convert to this code first; explicit targets win.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+
         ui.separator();
         if ui.button("Save & Apply").clicked() {
             self.apply_interval_fields();
+            self.apply_default_currency_target();
             if self.recorded_hotkey.is_some() {
                 self.apply_recorded_hotkey();
             } else {
@@ -1740,4 +1820,60 @@ pub fn format_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<Strin
 
     parts.push(key_str);
     Some(parts.join("+"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{ParsedInput, ResolvedZone, WallClock};
+
+    /// A plain currency parse result (`100 USD`); individual tests override
+    /// the fields their scenario needs.
+    fn currency_parsed(target: Option<&str>) -> ParsedInput {
+        ParsedInput {
+            value: 100.0,
+            end_value: None,
+            unit: Some("USD".to_string()),
+            target: target.map(str::to_string),
+            wall_clock: None,
+        }
+    }
+
+    #[test]
+    fn default_currency_pin_should_apply_without_explicit_target() {
+        let parsed = currency_parsed(None);
+        assert_eq!(
+            default_currency_pin(Some("PLN"), &parsed, true),
+            Some("PLN".to_string())
+        );
+    }
+
+    #[test]
+    fn default_currency_pin_should_keep_explicit_targets_over_the_setting() {
+        let parsed = currency_parsed(Some("EUR"));
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, true), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_skip_wall_clock_payloads() {
+        // A wall-clock target slot selects a timezone, never a currency.
+        let mut parsed = currency_parsed(None);
+        parsed.wall_clock = Some(WallClock {
+            epoch_seconds: 0,
+            source_zone: ResolvedZone::Utc,
+        });
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, true), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_not_fire_for_non_currency_sources() {
+        let parsed = currency_parsed(None);
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, false), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_stay_off_when_the_setting_is_none() {
+        let parsed = currency_parsed(None);
+        assert_eq!(default_currency_pin(None, &parsed, true), None);
+    }
 }
