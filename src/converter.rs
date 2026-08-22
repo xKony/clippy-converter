@@ -1,5 +1,6 @@
 use crate::db::Db;
 use crate::models::{Config, ConversionResult, ConvertedValue, UnitInfo};
+use crate::parser::ParsedInput;
 use anyhow::{Result, anyhow};
 
 /// A unit with precomputed lowercase forms so search never allocates per query.
@@ -192,6 +193,63 @@ impl Converter {
             input_unit: from_input.to_string(),
             outputs,
         })
+    }
+
+    /// Converts both endpoints of a parsed range such as `10-20 USD`.
+    ///
+    /// Each endpoint runs through the same conversion path as
+    /// [`Self::convert_preferring`]; the result keeps one row per endpoint in
+    /// start-then-end order, holding that endpoint's top-ranked conversion.
+    ///
+    /// # Errors
+    /// Returns an error if the input unit is unknown or if the conversion fails.
+    pub fn convert_range_preferring(
+        &self,
+        start: f64,
+        end: f64,
+        from_input: &str,
+        prefer: Option<&str>,
+    ) -> Result<ConversionResult> {
+        let mut outputs: Vec<ConvertedValue> = Vec::new();
+        let mut input_unit = String::new();
+        for value in [start, end] {
+            let result = self.convert_preferring(value, from_input, prefer)?;
+            if input_unit.is_empty() {
+                input_unit = result.input_unit;
+            }
+            if let Some(row) = result.outputs.first() {
+                // Collapses a degenerate range (`10-10 USD`) to one row instead
+                // of two identical ones; `to_bits` compares floats exactly.
+                let duplicate = outputs.last().is_some_and(|previous| {
+                    previous.unit == row.unit && previous.value.to_bits() == row.value.to_bits()
+                });
+                if !duplicate {
+                    outputs.push(row.clone());
+                }
+            }
+        }
+
+        Ok(ConversionResult {
+            input_value: start,
+            input_unit,
+            outputs,
+        })
+    }
+
+    /// Converts a parser result, emitting one row per endpoint when a range
+    /// (`10-20 USD`, `10 to 20 km`) was detected, otherwise behaving exactly
+    /// like [`Self::convert_preferring`].
+    ///
+    /// # Errors
+    /// Returns an error when no source unit is present or if the conversion fails.
+    pub fn convert_parsed(&self, parsed: &ParsedInput) -> Result<ConversionResult> {
+        let Some(unit) = parsed.unit.as_deref() else {
+            return Err(anyhow!("parsed input carries no source unit"));
+        };
+        parsed.end_value.map_or_else(
+            || self.convert_preferring(parsed.value, unit, parsed.target.as_deref()),
+            |end| self.convert_range_preferring(parsed.value, end, unit, parsed.target.as_deref()),
+        )
     }
 }
 
@@ -464,6 +522,35 @@ mod tests {
     }
 
     #[test]
+    fn convert_should_resolve_lowercase_currency_codes() {
+        let config = Config::default();
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("USD", 0.5, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("PLN", 0.25, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        let converter = Converter::new(config, db);
+
+        // Plain lowercase source unit.
+        let res = converter.convert(100.0, "usd").unwrap();
+        assert!(res.outputs.iter().any(|o| o.unit == "EUR"));
+
+        // Lowercase target clause pins the preferred unit.
+        // Base = 100 * 0.5 = 50; Target_PLN = 50 / 0.25 = 200.
+        let res = converter
+            .convert_preferring(100.0, "usd", Some("pln"))
+            .unwrap();
+        assert_eq!(res.outputs[0].unit, "PLN");
+        assert_relative_eq(res.outputs[0].value, 200.0);
+
+        // Mixed case too.
+        let res = converter.convert(1.0, "Eur").unwrap();
+        assert!(res.outputs.iter().any(|o| o.unit == "USD"));
+    }
+
+    #[test]
     fn all_units_should_honor_disabled_packs() {
         let mut config = Config::default();
         config.unit_packs.volume = false;
@@ -518,5 +605,122 @@ mod tests {
         let res = converter.convert(1.0, "bar").unwrap();
         let pa = res.outputs.iter().find(|o| o.unit == "Pa").unwrap();
         assert!((pa.value - 100_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn convert_range_should_emit_one_row_per_endpoint_in_order() {
+        let config = Config::default();
+        let db = create_test_db();
+        // EUR base (factor 1.0); 1 USD = 0.5 EUR.
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("USD", 0.5, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        let converter = Converter::new(config, db);
+
+        let parsed = ParsedInput {
+            value: 10.0,
+            end_value: Some(20.0),
+            unit: Some("USD".to_string()),
+            target: None,
+        };
+        let res = converter.convert_parsed(&parsed).unwrap();
+
+        assert_eq!(res.input_value, 10.0);
+        assert_eq!(res.outputs.len(), 2);
+        // EUR is a favorite, so it leads both endpoint rows.
+        assert_eq!(res.outputs[0].unit, "EUR");
+        assert_relative_eq(res.outputs[0].value, 5.0);
+        assert_eq!(res.outputs[1].unit, "EUR");
+        assert_relative_eq(res.outputs[1].value, 10.0);
+    }
+
+    #[test]
+    fn convert_parsed_should_convert_both_ends_of_parsed_dash_range() {
+        let config = Config::default();
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit("USD", 0.5, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        let converter = Converter::new(config, db);
+
+        let parsed = crate::parser::parse_input("10-20 USD").unwrap();
+        let res = converter.convert_parsed(&parsed).unwrap();
+
+        assert_eq!(res.outputs.len(), 2);
+        assert_relative_eq(res.outputs[0].value, 5.0);
+        assert_relative_eq(res.outputs[1].value, 10.0);
+    }
+
+    #[test]
+    fn convert_range_rows_should_match_single_conversions_and_honor_target() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let parsed = crate::parser::parse_input("5-10 km to mi").unwrap();
+        let res = converter.convert_parsed(&parsed).unwrap();
+
+        let single_start = converter.convert_preferring(5.0, "km", Some("mi")).unwrap();
+        let single_end = converter
+            .convert_preferring(10.0, "km", Some("mi"))
+            .unwrap();
+
+        assert_eq!(res.outputs.len(), 2);
+        assert_eq!(res.outputs[0].unit, "mi");
+        assert_relative_eq(res.outputs[0].value, single_start.outputs[0].value);
+        assert_eq!(res.outputs[1].unit, "mi");
+        assert_relative_eq(res.outputs[1].value, single_end.outputs[0].value);
+    }
+
+    #[test]
+    fn convert_range_should_collapse_degenerate_equal_endpoints_to_one_row() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let single = converter.convert(1.0, "m").unwrap();
+        let parsed = ParsedInput {
+            value: 1.0,
+            end_value: Some(1.0),
+            unit: Some("m".to_string()),
+            target: None,
+        };
+        let res = converter.convert_parsed(&parsed).unwrap();
+
+        assert_eq!(res.outputs.len(), 1);
+        assert_eq!(res.outputs[0].value, single.outputs[0].value);
+        assert_eq!(res.outputs[0].unit, single.outputs[0].unit);
+    }
+
+    #[test]
+    fn convert_parsed_should_error_without_source_unit() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let parsed = ParsedInput {
+            value: 5.0,
+            end_value: None,
+            unit: None,
+            target: None,
+        };
+        assert!(converter.convert_parsed(&parsed).is_err());
+    }
+
+    #[test]
+    fn convert_range_should_error_for_unknown_unit() {
+        let config = Config::default();
+        let db = create_test_db();
+        let converter = Converter::new(config, db);
+
+        let parsed = ParsedInput {
+            value: 1.0,
+            end_value: Some(2.0),
+            unit: Some("not-a-unit".to_string()),
+            target: None,
+        };
+        assert!(converter.convert_parsed(&parsed).is_err());
     }
 }

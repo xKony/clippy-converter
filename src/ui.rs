@@ -851,7 +851,7 @@ impl AppState {
         };
 
         if let Ok(parsed) = parsed {
-            self.apply_parsed_input(parsed);
+            self.apply_parsed_input(&parsed);
         } else {
             self.captured_value = 0.0;
             self.current_result = None;
@@ -861,23 +861,20 @@ impl AppState {
         self.focus_main_input = true;
     }
 
-    fn apply_parsed_input(&mut self, parsed: crate::parser::ParsedInput) {
+    fn apply_parsed_input(&mut self, parsed: &crate::parser::ParsedInput) {
         self.captured_value = parsed.value;
-        let Some(unit) = parsed.unit else {
+        let Some(unit) = parsed.unit.as_deref() else {
             self.current_result = None;
             self.current_mode = WindowMode::SourceUnitSelection;
             return;
         };
 
-        if let Ok(result) =
-            self.converter
-                .convert_preferring(parsed.value, &unit, parsed.target.as_deref())
-        {
+        if let Ok(result) = self.converter.convert_parsed(parsed) {
             self.current_result = Some(result);
             self.current_mode = WindowMode::Results;
             self.log_conversion_if_enabled();
         } else {
-            self.search_query = unit;
+            self.search_query = unit.to_string();
             self.search_query_lower = self.search_query.to_lowercase();
             self.current_result = None;
             self.current_mode = WindowMode::SourceUnitSelection;
@@ -1239,7 +1236,7 @@ impl AppState {
                 if ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && let Ok(parsed) = crate::parser::parse_input(&self.manual_input_value)
                 {
-                    self.apply_parsed_input(parsed);
+                    self.apply_parsed_input(&parsed);
                     self.focus_main_input = true;
                 }
             });

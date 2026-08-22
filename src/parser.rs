@@ -16,6 +16,8 @@ const CURRENCY_SYMBOLS: [(char, &str); 8] = [
 pub struct ParsedInput {
     /// The numeric value extracted from the string.
     pub value: f64,
+    /// Upper endpoint when the input was a range (`10-20 USD`), otherwise `None`.
+    pub end_value: Option<f64>,
     /// The optional source unit symbol or abbreviation extracted.
     pub unit: Option<String>,
     /// Optional explicit target from phrases like `100 USD to PLN`.
@@ -46,6 +48,18 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         }
     }
 
+    // Ranges must be detected before the single-value scan runs: otherwise the
+    // separator is misread as the start of the unit (`10-20 USD` -> `-20 USD`).
+    if let Some((start, end, unit_text)) = split_range(core_input) {
+        let (unit, target) = finalize_unit_and_target(unit_text, symbol_unit);
+        return Ok(ParsedInput {
+            value: start,
+            end_value: Some(end),
+            unit,
+            target,
+        });
+    }
+
     let (number_end, found_digit) = scan_number_end(core_input);
     if !found_digit {
         return Err(anyhow!("No numeric value found in: {input}"));
@@ -59,32 +73,11 @@ pub fn parse_input(input: &str) -> Result<ParsedInput> {
         .parse()
         .map_err(|_| anyhow!("Failed to parse numeric part: {value_raw}"))?;
 
-    let mut unit_str = core_input[number_end..].trim();
-    if symbol_unit.is_none()
-        && let Some((rest, unit)) = strip_trailing_currency(unit_str)
-    {
-        unit_str = rest;
-        symbol_unit = Some(unit);
-    }
-
-    let (source, target) = split_source_target(unit_str);
-    let unit = match (source.as_deref(), symbol_unit) {
-        (None, None) => None,
-        (Some(s), None) => Some(s.to_string()),
-        (None, Some(sym)) => Some(sym.to_string()),
-        (Some(s), Some(sym)) => {
-            if s.eq_ignore_ascii_case(sym)
-                || s.to_lowercase().ends_with(sym.to_lowercase().as_str())
-            {
-                Some(s.to_string())
-            } else {
-                Some(format!("{s} {sym}"))
-            }
-        }
-    };
+    let (unit, target) = finalize_unit_and_target(&core_input[number_end..], symbol_unit);
 
     Ok(ParsedInput {
         value,
+        end_value: None,
         unit,
         target,
     })
@@ -158,6 +151,94 @@ fn exponent_continues(after_e: &str) -> bool {
     }
 }
 
+/// Detects `<start>-<end> <unit>` / `<start> to <end> <unit>` shapes and
+/// returns `(start, end, unit_text)`.
+///
+/// Every candidate separator must have plain numbers on both sides and leave a
+/// non-empty unit-like remainder; otherwise the caller falls through to the
+/// single-value path instead of erroring. This keeps dates (`2020-01-02`),
+/// versions (`1.2.3`), negative singles (`-5 USD`) and times (`17:30 UTC`) on
+/// their existing behavior.
+fn split_range(core_input: &str) -> Option<(f64, f64, &str)> {
+    // A `-` counts as a separator only when squeezed directly between two
+    // digits, so spaced dashes and signed values stay out of range territory.
+    let mut previous_was_digit = false;
+    for (i, c) in core_input.char_indices() {
+        let next_is_digit = core_input[i + c.len_utf8()..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_digit());
+        if c == '-'
+            && previous_was_digit
+            && next_is_digit
+            && let Some(found) = range_parts(&core_input[..i], &core_input[i + 1..])
+        {
+            return Some(found);
+        }
+        previous_was_digit = c.is_ascii_digit();
+    }
+
+    for (word_start, word_end) in standalone_to_word_spans(core_input) {
+        if let Some(found) = range_parts(&core_input[..word_start], &core_input[word_end..]) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// Validates one candidate range split: both sides must be fully numeric and
+/// the remainder after the second number must look like a unit, not like more
+/// numeric input (which would mean a date such as `2020-01-02`).
+fn range_parts<'a>(left: &str, right: &'a str) -> Option<(f64, f64, &'a str)> {
+    let start = parse_plain_number(left.trim())?;
+
+    let (number_end, found_digit) = scan_number_end(right);
+    if !found_digit {
+        return None;
+    }
+    let end = parse_plain_number(right[..number_end].trim())?;
+
+    let unit_text = right[number_end..].trim();
+    let unit_like = unit_text
+        .chars()
+        .next()
+        .is_some_and(|first| !first.is_ascii_digit() && !matches!(first, '+' | '-' | '.' | ','));
+    if !unit_like {
+        return None;
+    }
+
+    Some((start, end, unit_text))
+}
+
+/// Parses a complete token as a plain (possibly grouped) number, returning
+/// `None` for anything partially numeric so range detection can fall back.
+fn parse_plain_number(token: &str) -> Option<f64> {
+    normalize_numeric(token)?.parse::<f64>().ok()
+}
+
+/// Finds byte spans of standalone `to`/`TO` words surrounded by whitespace.
+///
+/// Scans ASCII bytes directly because lowercasing the whole string can change
+/// character lengths for some Unicode inputs, which would misalign indices cut
+/// from the original string.
+fn standalone_to_word_spans(input: &str) -> Vec<(usize, usize)> {
+    let bytes = input.as_bytes();
+    let mut spans = Vec::new();
+    for (i, &byte) in bytes.iter().enumerate() {
+        let standalone_to = matches!(byte, b't' | b'T')
+            && i > 0
+            && bytes[i - 1].is_ascii_whitespace()
+            && i + 2 < bytes.len()
+            && matches!(bytes[i + 1], b'o' | b'O')
+            && bytes[i + 2].is_ascii_whitespace();
+        if standalone_to {
+            spans.push((i, i + 2));
+        }
+    }
+    spans
+}
+
 /// Turns grouped/locale number text into something `f64::parse` accepts.
 ///
 /// Returns `None` for tokens that mix an exponent marker with a comma
@@ -201,6 +282,41 @@ fn normalize_numeric(raw: &str) -> Option<String> {
         }
         _ => compact,
     })
+}
+
+/// Resolves leftover text after the number into a source unit and optional
+/// explicit target, folding in a currency glyph when the text does not name a
+/// currency itself.
+///
+/// Shared by the single-value and range paths so both build units identically.
+fn finalize_unit_and_target(
+    unit_str: &str,
+    mut symbol_unit: Option<&'static str>,
+) -> (Option<String>, Option<String>) {
+    let mut unit_str = unit_str.trim();
+    if symbol_unit.is_none()
+        && let Some((rest, unit)) = strip_trailing_currency(unit_str)
+    {
+        unit_str = rest;
+        symbol_unit = Some(unit);
+    }
+
+    let (source, target) = split_source_target(unit_str);
+    let unit = match (source.as_deref(), symbol_unit) {
+        (None, None) => None,
+        (Some(s), None) => Some(s.to_string()),
+        (None, Some(sym)) => Some(sym.to_string()),
+        (Some(s), Some(sym)) => {
+            if s.eq_ignore_ascii_case(sym)
+                || s.to_lowercase().ends_with(sym.to_lowercase().as_str())
+            {
+                Some(s.to_string())
+            } else {
+                Some(format!("{s} {sym}"))
+            }
+        }
+    };
+    (unit, target)
 }
 
 fn strip_trailing_currency(unit_str: &str) -> Option<(&str, &'static str)> {
@@ -409,5 +525,158 @@ mod tests {
         assert_eq!(res.value, 100.0);
         assert_eq!(res.unit, Some("USD".to_string()));
         assert_eq!(res.target, Some("EUR".to_string()));
+    }
+
+    #[test]
+    fn parse_should_split_target_regardless_of_case() {
+        let res = parse_input("100 usd to pln").unwrap();
+        assert_eq!(res.value, 100.0);
+        assert_eq!(res.unit, Some("usd".to_string()));
+        assert_eq!(res.target, Some("pln".to_string()));
+
+        let res = parse_input("100 Usd To Pln").unwrap();
+        assert_eq!(res.unit, Some("Usd".to_string()));
+        assert_eq!(res.target, Some("Pln".to_string()));
+
+        let res = parse_input("$100 -> eur").unwrap();
+        assert_eq!(res.target, Some("eur".to_string()));
+    }
+
+    #[test]
+    fn parse_should_detect_dash_range_with_explicit_unit() {
+        let res = parse_input("10-20 USD").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+        assert_eq!(res.target, None);
+    }
+
+    #[test]
+    fn parse_should_detect_spelled_to_range_when_unit_follows() {
+        let res = parse_input("10 to 20 USD").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+
+        let res = parse_input("10 TO 20 USD").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_accept_grouped_digits_in_ranges() {
+        let res = parse_input("1,000-2,000 USD").unwrap();
+        assert_eq!(res.value, 1000.0);
+        assert_eq!(res.end_value, Some(2000.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+
+        let res = parse_input("1 000 to 2 000 USD").unwrap();
+        assert_eq!(res.value, 1000.0);
+        assert_eq!(res.end_value, Some(2000.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_accept_exponent_endpoints_in_range() {
+        let res = parse_input("1e3-2e3 m").unwrap();
+        assert_eq!(res.value, 1000.0);
+        assert_eq!(res.end_value, Some(2000.0));
+        assert_eq!(res.unit, Some("m".to_string()));
+
+        let res = parse_input("1e-3-2e-3 m").unwrap();
+        assert_eq!(res.value, 0.001);
+        assert_eq!(res.end_value, Some(0.002));
+        assert_eq!(res.unit, Some("m".to_string()));
+    }
+
+    #[test]
+    fn parse_should_keep_target_clause_on_detected_range() {
+        let res = parse_input("10-20 USD to PLN").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+        assert_eq!(res.target, Some("PLN".to_string()));
+    }
+
+    #[test]
+    fn parse_should_not_mistake_target_clause_for_range() {
+        let res = parse_input("100 USD to PLN").unwrap();
+        assert_eq!(res.value, 100.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some("USD".to_string()));
+        assert_eq!(res.target, Some("PLN".to_string()));
+    }
+
+    #[test]
+    fn parse_should_fall_back_to_target_clause_when_to_lacks_second_number() {
+        let res = parse_input("10 to PLN").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, None);
+        assert_eq!(res.target, Some("PLN".to_string()));
+    }
+
+    #[test]
+    fn parse_should_not_trigger_range_on_date_like_input() {
+        // Falls through to today's behavior: first token becomes the value,
+        // the rest becomes a bogus unit that the converter rejects.
+        let res = parse_input("2020-01-02").unwrap();
+        assert_eq!(res.value, 2020.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some("-01-02".to_string()));
+    }
+
+    #[test]
+    fn parse_should_not_trigger_range_on_version_like_input() {
+        // Same failures as before ranges existed; importantly no range result.
+        assert!(parse_input("1.2.3").is_err());
+        assert!(parse_input("1.2.3-4.5.6").is_err());
+    }
+
+    #[test]
+    fn parse_should_keep_negative_single_value_out_of_range_detection() {
+        let res = parse_input("-5 USD").unwrap();
+        assert_eq!(res.value, -5.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_not_trigger_range_on_time_like_input() {
+        let res = parse_input("17:30 UTC").unwrap();
+        assert_eq!(res.value, 17.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some(":30 UTC".to_string()));
+    }
+
+    #[test]
+    fn parse_should_require_explicit_unit_after_dash_range() {
+        // Bare endpoints have nothing to convert; keep the old fall-through.
+        let res = parse_input("10-20").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some("-20".to_string()));
+    }
+
+    #[test]
+    fn parse_should_fall_through_when_range_side_is_not_numeric() {
+        let res = parse_input("10-twenty USD").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, None);
+        assert_eq!(res.unit, Some("-twenty USD".to_string()));
+    }
+
+    #[test]
+    fn parse_should_support_currency_glyphs_in_ranges() {
+        let res = parse_input("$10-20 USD").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
+
+        let res = parse_input("10-20$").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.end_value, Some(20.0));
+        assert_eq!(res.unit, Some("USD".to_string()));
     }
 }

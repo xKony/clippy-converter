@@ -349,6 +349,20 @@ impl Db {
             return Ok(canonical.value().to_string());
         }
 
+        // 3. Case-insensitive canonical match (e.g., "usd" -> "USD"). Currency
+        // codes have no aliases, so a casually typed lowercase code must still
+        // resolve to its stored form.
+        let units_table = read_txn
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
+        for result in units_table.iter().context("Failed to iterate units")? {
+            let (key, _) = result.context("Failed to read unit row")?;
+            let canonical = key.value();
+            if lower.eq_ignore_ascii_case(canonical) {
+                return Ok(canonical.to_string());
+            }
+        }
+
         Ok(symbol.to_string())
     }
 
