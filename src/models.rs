@@ -43,6 +43,12 @@ pub struct Config {
     /// How to group thousands in displayed numbers (not used when copying).
     #[serde(default)]
     pub thousand_separator: ThousandSeparator,
+    /// Fixed decimal places shown everywhere (None = context-appropriate auto).
+    #[serde(default)]
+    pub display_decimals: Option<u8>,
+    /// Decimal places for copied values (None = full float repr).
+    #[serde(default)]
+    pub copy_decimals: Option<u8>,
     /// Optional extra unit groups. Core length/weight/temperature/time/currency stay on.
     #[serde(default)]
     pub unit_packs: UnitPacks,
@@ -132,6 +138,27 @@ pub fn sanitize_interval_mins(field: &'static str, mins: u64, default: u64) -> u
     }
 }
 
+/// Upper bound for user-configured decimal places.
+pub const MAX_DECIMALS: u8 = 10;
+
+/// Returns the configured decimal count when it is at most [`MAX_DECIMALS`],
+/// otherwise warns and falls back to `None` (auto).
+#[must_use]
+pub fn sanitize_decimals(field: &'static str, decimals: Option<u8>) -> Option<u8> {
+    match decimals {
+        None | Some(0..=MAX_DECIMALS) => decimals,
+        Some(too_many) => {
+            warn!(
+                field,
+                value = too_many,
+                max = MAX_DECIMALS,
+                "decimal place setting out of range; falling back to auto"
+            );
+            None
+        }
+    }
+}
+
 /// Optional unit groups the user can toggle in Settings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[expect(
@@ -214,6 +241,8 @@ impl Default for Config {
             fiat_update_interval_mins: DEFAULT_FIAT_INTERVAL_MINS, // Daily
             crypto_update_interval_mins: DEFAULT_CRYPTO_INTERVAL_MINS, // Every hour
             thousand_separator: ThousandSeparator::None,
+            display_decimals: None,
+            copy_decimals: None,
             unit_packs: UnitPacks::default(),
             start_with_windows: false,
         }
@@ -277,6 +306,8 @@ impl Config {
             warn!(hotkey = %self.hotkey, "invalid hotkey in config; falling back to default");
             self.hotkey = DEFAULT_HOTKEY.to_string();
         }
+        self.display_decimals = sanitize_decimals("display_decimals", self.display_decimals);
+        self.copy_decimals = sanitize_decimals("copy_decimals", self.copy_decimals);
         self
     }
 
@@ -541,6 +572,25 @@ mod tests {
     fn from_json_should_fall_back_to_defaults_for_wholly_corrupt_json() {
         let config = Config::from_json("{not valid json!!");
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn sanitized_should_salvage_out_of_range_decimal_places() {
+        let config = Config {
+            display_decimals: Some(11),
+            copy_decimals: Some(200),
+            ..Config::default()
+        };
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.display_decimals, None);
+        assert_eq!(sanitized.copy_decimals, None);
+    }
+
+    #[test]
+    fn decimals_should_default_to_auto_in_json() {
+        let config = Config::from_json("{}");
+        assert_eq!(config.display_decimals, None);
+        assert_eq!(config.copy_decimals, None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::clipboard::{CaptureOutcome, ClipboardManager};
 use crate::converter::Converter;
 use crate::db::Db;
-use crate::format::{format_copy, format_display};
+use crate::format::{format_copy_precise, format_display};
 use crate::history::HistoryItem;
 use crate::hotkey;
 use crate::models::{
@@ -436,6 +436,7 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn fmt_num(&self, value: f64, precision: usize) -> String {
+        let precision = self.config.display_decimals.map_or(precision, usize::from);
         format_display(value, precision, self.config.thousand_separator)
     }
 
@@ -753,7 +754,8 @@ impl AppState {
             self.copied_notification = Some(("Invalid value".to_string(), Instant::now()));
             return;
         }
-        if self.clipboard.set_text(format_copy(value)).is_ok() {
+        let text = format_copy_precise(value, self.config.copy_decimals.map(usize::from));
+        if self.clipboard.set_text(text).is_ok() {
             self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
             if dismiss {
                 self.main_window_open = false;
@@ -957,6 +959,46 @@ impl AppState {
                 "Commas",
             );
             if off.changed() || spaces.changed() || commas.changed() {
+                self.persist_config();
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // Fixed decimal places for displayed and copied values. Toggling Auto
+        // writes back immediately; the drag fields only exist when pinned.
+        ui.label("Decimal places (Auto adapts per context)");
+        ui.horizontal(|ui| {
+            let mut changed = false;
+
+            ui.label("Display:");
+            let mut display_auto = self.config.display_decimals.is_none();
+            if ui.checkbox(&mut display_auto, "Auto").changed() {
+                self.config.display_decimals = if display_auto { None } else { Some(2) };
+                changed = true;
+            }
+            if let Some(decimals) = self.config.display_decimals.as_mut() {
+                let widget = egui::DragValue::new(decimals)
+                    .range(0..=crate::models::MAX_DECIMALS)
+                    .suffix(" digits");
+                changed |= ui.add(widget).changed();
+            }
+
+            ui.add_space(8.0);
+            ui.label("Copy:");
+            let mut copy_auto = self.config.copy_decimals.is_none();
+            if ui.checkbox(&mut copy_auto, "Auto").changed() {
+                self.config.copy_decimals = if copy_auto { None } else { Some(2) };
+                changed = true;
+            }
+            if let Some(decimals) = self.config.copy_decimals.as_mut() {
+                let widget = egui::DragValue::new(decimals)
+                    .range(0..=crate::models::MAX_DECIMALS)
+                    .suffix(" digits");
+                changed |= ui.add(widget).changed();
+            }
+
+            if changed {
                 self.persist_config();
             }
         });
@@ -1524,7 +1566,7 @@ impl AppState {
         if let Some(idx) = history_action.inner.1
             && let Some(item) = self.recent_history.get(idx)
         {
-            let text = Self::history_output_text(item);
+            let text = self.history_output_text(item);
             if self.clipboard.set_text(text).is_ok() {
                 self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
             }
@@ -1572,8 +1614,12 @@ impl AppState {
         p.line_segment([egui::pos2(right, y), egui::pos2(tip, y + 4.0)], stroke);
     }
 
-    fn history_output_text(item: &HistoryItem) -> String {
-        format!("{} {}", format_copy(item.output_value), item.output_unit)
+    fn history_output_text(&self, item: &HistoryItem) -> String {
+        let value = format_copy_precise(
+            item.output_value,
+            self.config.copy_decimals.map(usize::from),
+        );
+        format!("{value} {}", item.output_unit)
     }
 
     fn reopen_history_item(&mut self, item: &HistoryItem) {

@@ -29,9 +29,30 @@ pub fn format_display(value: f64, precision: usize, separator: ThousandSeparator
 }
 
 /// Formats a number for clipboard copy (no thousand separators).
+///
+/// `precision` pins the decimal places (trailing zeros trimmed); `None`
+/// keeps the full float repr.
+#[must_use]
+pub fn format_copy_precise(value: f64, precision: Option<usize>) -> String {
+    let Some(precision) = precision else {
+        return value.to_string();
+    };
+    if !value.is_finite() {
+        return value.to_string();
+    }
+
+    let formatted = format!("{value:.precision$}");
+    if formatted.contains('.') {
+        let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+        return trimmed.to_string();
+    }
+    formatted
+}
+
+/// Formats a number for clipboard copy (no thousand separators).
 #[must_use]
 pub fn format_copy(value: f64) -> String {
-    value.to_string()
+    format_copy_precise(value, None)
 }
 
 fn group_integer(integer: &str, separator: ThousandSeparator) -> String {
@@ -101,5 +122,25 @@ mod tests {
     #[test]
     fn copy_has_no_separators() {
         assert_eq!(format_copy(1_234_567.89), "1234567.89");
+    }
+
+    #[test]
+    fn copy_precision_rounds_and_trims_zeros() {
+        assert_eq!(format_copy_precise(1_234.567_8, Some(2)), "1234.57");
+        assert_eq!(format_copy_precise(100.0, Some(4)), "100");
+        assert_eq!(format_copy_precise(-2.675, Some(1)), "-2.7");
+    }
+
+    #[test]
+    fn copy_none_keeps_full_repr() {
+        assert_eq!(
+            format_copy_precise(1.0_f64 / 3.0, None),
+            "0.3333333333333333"
+        );
+    }
+
+    #[test]
+    fn copy_precision_handles_non_finite() {
+        assert_eq!(format_copy_precise(f64::INFINITY, Some(2)), "inf");
     }
 }
