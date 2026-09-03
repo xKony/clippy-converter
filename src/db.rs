@@ -4,7 +4,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::{RateSource, UnitCategory, UnitEntry, portable_data_dir};
+use crate::models::{RateSource, UnitCategory, UnitEntry};
 
 /// Schema for unified units and currency rates.
 const UNITS_TABLE: TableDefinition<&str, UnitEntry> = TableDefinition::new("units_v2");
@@ -1106,9 +1106,6 @@ fn add_unit_static(
 }
 
 fn get_db_path() -> Result<PathBuf> {
-    if let Some(dir) = portable_data_dir()? {
-        return Ok(dir.join("rates.redb"));
-    }
     let proj_dirs = ProjectDirs::from("com", "clippy", "clippy-converter")
         .context("Could not determine application cache directory")?;
     Ok(proj_dirs.cache_dir().join("rates.redb"))

@@ -19,9 +19,6 @@ pub const MAX_UPDATE_INTERVAL_MINS: u64 = 10_080;
 pub const DEFAULT_FIAT_INTERVAL_MINS: u64 = 1440;
 /// Default crypto refresh interval in minutes.
 pub const DEFAULT_CRYPTO_INTERVAL_MINS: u64 = 60;
-/// Marker file that, when present next to the running executable, switches the
-/// application into portable mode (config and database resolve beside the exe).
-pub const PORTABLE_MARKER_NAME: &str = "portable.flag";
 
 /// Configuration for the Clippy Converter application.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,51 +472,8 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .with_context(|| format!("Failed to write data to file at {}", path.display()))
 }
 
-/// Returns the portable data directory when `exe_dir` contains a [`PORTABLE_MARKER_NAME`]
-/// file, otherwise `None` (standard install behavior).
-#[must_use]
-pub fn portable_data_dir_for(exe_dir: &Path) -> Option<PathBuf> {
-    exe_dir
-        .join(PORTABLE_MARKER_NAME)
-        .is_file()
-        .then(|| exe_dir.to_path_buf())
-}
-
-/// Detects portable mode relative to the running executable and ensures the
-/// portable data directory exists.
-///
-/// # Errors
-/// Returns an error if the executable directory cannot be created.
-pub(crate) fn portable_data_dir() -> Result<Option<PathBuf>> {
-    let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-    else {
-        return Ok(None);
-    };
-    let Some(dir) = portable_data_dir_for(&exe_dir) else {
-        return Ok(None);
-    };
-    fs::create_dir_all(&dir).with_context(|| {
-        format!(
-            "Failed to create portable data directory at {}",
-            dir.display()
-        )
-    })?;
-    Ok(Some(dir))
-}
-
-/// Returns `true` when the running executable is in portable mode.
-#[must_use]
-pub(crate) fn is_portable_mode() -> bool {
-    portable_data_dir().is_ok_and(|dir| dir.is_some())
-}
-
 /// Helper to get the path to the configuration file.
 fn get_config_path() -> Result<PathBuf> {
-    if let Some(dir) = portable_data_dir()? {
-        return Ok(dir.join("config.json"));
-    }
     let proj_dirs = ProjectDirs::from("com", "clippy", "clippy-converter")
         .context("Could not determine application config directory")?;
     Ok(proj_dirs.config_dir().join("config.json"))
@@ -851,31 +805,5 @@ mod tests {
 
         let loaded = Config::load_from_path(&path).unwrap();
         assert_eq!(loaded, Config::default());
-    }
-
-    #[test]
-    fn portable_data_dir_for_should_activate_when_marker_file_present() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(PORTABLE_MARKER_NAME), "").unwrap();
-
-        assert_eq!(
-            portable_data_dir_for(dir.path()).as_deref(),
-            Some(dir.path())
-        );
-    }
-
-    #[test]
-    fn portable_data_dir_for_should_stay_standard_without_marker() {
-        let dir = tempfile::tempdir().unwrap();
-
-        assert_eq!(portable_data_dir_for(dir.path()), None);
-    }
-
-    #[test]
-    fn portable_data_dir_for_should_ignore_marker_directory_placeholder() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join(PORTABLE_MARKER_NAME)).unwrap();
-
-        assert_eq!(portable_data_dir_for(dir.path()), None);
     }
 }
