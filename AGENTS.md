@@ -9,13 +9,13 @@
 ## 2. Exact versions
 - **Runtime:** Rust Edition 2024
 - **Package Manager:** Cargo
-- **Framework:** egui 0.34.1 / eframe 0.34.1
+- **Framework:** egui 0.36.1 / eframe 0.36.1
 - **Language:** Rust 2024
 - **Dependencies:**
   - `anyhow`: 1.0
-  - `eframe`: 0.34.1 (features: ["glow"])
-  - `egui`: 0.34.1
-  - `egui_extras`: 0.34.1 (features: ["svg"])
+  - `eframe`: 0.36.1 (features: ["glow", "inspection"])
+  - `egui`: 0.36.1
+  - `egui_extras`: 0.36.1 (features: ["svg"])
   - `image`: 0.25 (features: ["ico", "png"]; already transitive via arboard/eframe)
   - `global-hotkey`: 0.7.0
   - `arboard`: 3.4
@@ -41,14 +41,14 @@
 - `src/api.rs`: External HTTP requests to Binance and fiat currency APIs (shared `reqwest` client with timeouts; jsDelivr then Cloudflare Pages for fiat, both with `error_for_status`; Binance results filtered to USDT pairs, with leveraged/1000x/1M noise pairs dropped).
 - `src/autostart.rs`: Windows current-user Run key (`Start with Windows` setting).
 - `src/clipboard.rs`: Clipboard capture via Enigo (Ctrl+C / Cmd+C) and Arboard, with marker-based wait and clipboard restore.
-- `src/converter.rs`: Core engine for calculating unit and currency conversions (cached unit list with invalidation; `convert_preferring` pins an explicit `to`/`in` target).
+- `src/converter.rs`: Core engine for calculating unit and currency conversions (cached unit list with invalidation; `convert_preferring` pins an explicit `to`/`in` target). Compound/rate units (`USD/kg`, `kWh/100km`) recompose their factor live from component rows via `resolve_compound_factor`; seeded `Compound` rows carry placeholder factors only.
 - `src/db.rs`: Thread-safe wrapper for redb; batched rate writes; corrupt-entry detection; versioned static unit seed (`STATIC_UNITS` + `meta.static_seed_version`).
 - `src/format.rs`: Display vs copy number formatting (`ThousandSeparator` grouping is display-only).
 - `src/history.rs`: Append-only conversion log with at-most-daily atomic prune.
 - `src/hotkey.rs`: Parsing human-readable hotkeys into system structures.
 - `src/main.rs`: Application entry point, tracing init, single-instance lock, eframe handoff.
 - `src/models.rs`: Core data structures (`Config`, `UnitCategory`, `UnitEntry`) and local JSON configuration logic.
-- `src/parser.rs`: Value extraction: grouped digits, leading/trailing currency glyphs, and `to`/`in` target clauses.
+- `src/parser.rs`: Value extraction: grouped digits, leading/trailing currency glyphs, `/`-joined rate fragments (`$100/hr` -> `USD/hr`), and `to`/`in` target clauses.
 - `src/placement.rs`: Cursor-relative popup positioning with DPI-aware monitor work-area clamp (Windows `MonitorFromPoint`; 1920×1080 fallback elsewhere).
 - `src/theme.rs`: egui dark theme and spacing.
 - `src/ui.rs`: egui/eframe UI state machine, floating window, tray menu, and hotkey wiring. Settings checkboxes persist immediately; interval/hotkey changes still have a Save & Apply path. Popup shows cached rate age.
@@ -83,6 +83,7 @@
 - **UI Config:** egui Window uses `decorations: false` and `AlwaysOnTop` via `ViewportBuilder`; vsync is on.
 
 ## 8. Development conventions
+- **Rust best practices:** Always load and follow the `rust-best-practices` skill when writing, reviewing, or refactoring Rust code in this repo (Apollo GraphQL handbook: borrowing vs cloning, error handling via `Result`/`thiserror`/`anyhow`, clippy-driven linting, descriptive test names, static dispatch).
 - **Naming conventions:** Standard Rust `snake_case` for functions/variables, `PascalCase` for types.
 - **Error Handling:** Pervasive use of `anyhow::Result` and `.context()` for descriptive error bubbling; prefer `tracing::{error,warn}` over silent `let _ =` at call sites.
 - **Documentation:** Modules and functions use standard Rust doc comments (`///`).

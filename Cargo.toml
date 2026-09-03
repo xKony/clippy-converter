@@ -28,12 +28,15 @@ redb = "4.1.0"
 bincode = "1.3.3"
 directories = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
+# Compile-time IANA tables for wall-clock conversion (#14); `case-insensitive`
+# lets `europe/warsaw` resolve the same as `Europe/Warsaw`.
+chrono-tz = { version = "0.10", features = ["case-insensitive"] }
 tray-icon = "0.19"
 open = "5.3"
 single-instance = "0.3.3"
-eframe = { version = "0.34.1", features = ["glow"] }
-egui = "0.34.1"
-egui_extras = { version = "0.34.1", features = ["svg"] }
+eframe = { version = "0.36.1", features = ["glow", "inspection"] }
+egui = "0.36.1"
+egui_extras = { version = "0.36.1", features = ["svg"] }
 # Reads the native HWND so placement.rs can request DWM-rounded corners.
 raw-window-handle = "0.6"
 # Decodes icons/clippy-converter_icon.ico for the tray; already in the tree
@@ -61,6 +64,11 @@ x11rb = { version = "0.13", features = ["randr"] }
 
 [dev-dependencies]
 tempfile = "3.10"
+
+# Embeds icons/clippy-converter_icon.ico into the exe via build.rs so
+# Explorer/taskbar/MSI shortcuts show the app icon instead of a generic one.
+[build-dependencies]
+winresource = "0.1"
 
 [profile.dev]
 debug = "line-tables-only"

@@ -1,8 +1,9 @@
+use crate::format::format_history_value;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt, BufReader as AsyncBufReader};
@@ -14,36 +15,96 @@ const PRUNE_MARKER_NAME: &str = ".history_pruned";
 /// A parsed history log entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryItem {
+    pub timestamp: Option<DateTime<Utc>>,
     pub input_value: f64,
     pub input_unit: String,
     pub output_value: f64,
     pub output_unit: String,
 }
 
+/// Byte size of one backward read step when scanning the history tail.
+const TAIL_CHUNK_BYTES: u64 = 8 * 1024;
+
 /// Returns the most recent history entries (newest first), up to `limit`.
 ///
+/// The log is scanned backwards in chunks so a large file (possible when
+/// retention is `Never`) costs a few KiB of I/O per popup open instead of a
+/// full-file read.
+///
 /// # Errors
-/// Returns an error if the history file cannot be read.
+/// Returns an error if the history file cannot be opened or read.
 pub fn list_recent(limit: usize) -> Result<Vec<HistoryItem>> {
     let path = get_history_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
+    list_recent_at(&path, limit)
+}
 
-    let file = fs::File::open(&path)
-        .with_context(|| format!("Failed to open history log at {}", path.display()))?;
-    let reader = BufReader::new(file);
-
-    let mut items = Vec::new();
-    for line in reader.lines() {
-        let line = line.context("Failed to read history line")?;
-        if let Some(item) = parse_history_line(&line) {
-            items.push(item);
-        }
+/// Testable core of [`list_recent`], parameterized over an explicit path so
+/// the bounded tail read can be exercised against a temp directory in tests.
+fn list_recent_at(path: &Path, limit: usize) -> Result<Vec<HistoryItem>> {
+    if limit == 0 {
+        return Ok(Vec::new());
     }
 
-    let skip = items.len().saturating_sub(limit);
-    Ok(items.into_iter().skip(skip).rev().collect())
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("Failed to open history log at {}", path.display()))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("Failed to stat history log at {}", path.display()))?
+        .len();
+
+    let mut items: Vec<HistoryItem> = Vec::with_capacity(limit.min(64));
+    // Bytes of the earliest line seen so far that may not be complete yet; it
+    // is terminated either by the next (leftward) chunk or by the file start.
+    let mut fragment: Vec<u8> = Vec::new();
+    let mut end = len;
+
+    while end > 0 && items.len() < limit {
+        let start = end.saturating_sub(TAIL_CHUNK_BYTES);
+        let chunk_len =
+            usize::try_from(end - start).context("history log size exceeds platform limits")?;
+        let mut buf = vec![0_u8; chunk_len];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut buf))
+            .with_context(|| format!("Failed to read history log at {}", path.display()))?;
+
+        // Walk the window right-to-left, closing one line at each newline
+        // byte. Splitting happens on raw bytes (`b'\n'` is ASCII) and each
+        // finished line is decoded whole, so multi-byte UTF-8 units such as
+        // `m²` are never corrupted by a chunk boundary.
+        let mut cursor = buf.len();
+        while items.len() < limit {
+            let Some(nl) = buf[..cursor].iter().rposition(|&b| b == b'\n') else {
+                // No newline left in this window: everything scanned so
+                // far belongs to one still-open line.
+                let mut joined = Vec::with_capacity(cursor + fragment.len());
+                joined.extend_from_slice(&buf[..cursor]);
+                joined.append(&mut fragment);
+                fragment = joined;
+                break;
+            };
+            let mut line = Vec::from(&buf[nl + 1..cursor]);
+            line.extend_from_slice(&fragment);
+            fragment.clear();
+            if let Some(item) = parse_history_line(&String::from_utf8_lossy(&line)) {
+                items.push(item);
+            }
+            cursor = nl;
+        }
+        end = start;
+    }
+
+    // The first line of the file has no preceding newline; it only terminates
+    // once the scan reaches the very start.
+    if items.len() < limit
+        && let Some(item) = parse_history_line(&String::from_utf8_lossy(&fragment))
+    {
+        items.push(item);
+    }
+
+    Ok(items)
 }
 
 fn parse_history_line(line: &str) -> Option<HistoryItem> {
@@ -54,15 +115,40 @@ fn parse_history_line(line: &str) -> Option<HistoryItem> {
     let left = rest[..arrow_idx].trim();
     let right = rest[arrow_idx + 2..].trim();
 
+    let timestamp = line[1..pipe_idx]
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<DateTime<Utc>>()
+        .ok();
+
     let (input_value, input_unit) = split_value_unit(left)?;
     let (output_value, output_unit) = split_value_unit(right)?;
 
     Some(HistoryItem {
+        timestamp,
         input_value,
         input_unit,
         output_value,
         output_unit,
     })
+}
+
+/// Human-readable relative age of a history entry, bucketed by magnitude:
+/// seconds collapse to "just now", then minutes, hours, and days.
+#[must_use]
+pub fn relative_age(timestamp: DateTime<Utc>) -> String {
+    let elapsed = Utc::now() - timestamp;
+    let secs = elapsed.num_seconds().max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 60 * 60 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 60 * 60 * 24 {
+        format!("{}h ago", secs / (60 * 60))
+    } else {
+        format!("{}d ago", secs / (60 * 60 * 24))
+    }
 }
 
 fn split_value_unit(part: &str) -> Option<(f64, String)> {
@@ -93,7 +179,9 @@ pub async fn log_conversion(
 
     let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let entry = format!(
-        "[{timestamp}] | {input_value:.4} {input_unit} -> {output_value:.4} {output_unit}\n"
+        "[{timestamp}] | {} {input_unit} -> {} {output_unit}\n",
+        format_history_value(input_value),
+        format_history_value(output_value),
     );
 
     append_entry(&path, &entry).await
@@ -246,6 +334,49 @@ async fn prune_history_atomic(path: &Path, days: i64) -> Result<()> {
     Ok(())
 }
 
+/// Wipes the entire history log.
+///
+/// Uses the same crash-safe temp-file + rename pattern as
+/// [`prune_history_atomic`] so an interrupted clear can never leave a
+/// half-written log behind. A missing history file is treated as already clear.
+///
+/// # Errors
+/// Returns an error if creating the empty replacement file or renaming it
+/// over the original fails.
+pub async fn clear_history() -> Result<()> {
+    let path = get_history_path()?;
+    clear_history_at(&path).await
+}
+
+/// Testable core of [`clear_history`], parameterized over an explicit path so
+/// the wipe behavior can be exercised against a temp directory in tests.
+async fn clear_history_at(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(
+        "history.{}.tmp",
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+
+    tokio::fs::File::create(&temp_path)
+        .await
+        .with_context(|| format!("Failed to create temp history at {}", temp_path.display()))?;
+
+    if let Err(err) = tokio::fs::rename(&temp_path, path).await {
+        warn!(
+            error = %err,
+            temp = %temp_path.display(),
+            "atomic history rename failed; leaving original intact"
+        );
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(err).context("Failed to replace history log atomically");
+    }
+
+    Ok(())
+}
+
 /// Helper to get the path to the history log file.
 ///
 /// # Errors
@@ -260,6 +391,16 @@ pub fn get_history_path() -> Result<PathBuf> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
+    use std::fmt::Write as _;
+
+    /// Relative-tolerance float assertion for test expectations.
+    fn assert_relative_eq(a: f64, b: f64) {
+        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= tolerance,
+            "expected {a} to equal {b} within relative tolerance"
+        );
+    }
 
     #[tokio::test]
     async fn test_log_conversion_path() {
@@ -272,10 +413,51 @@ mod tests {
     fn test_parse_history_line() {
         let line = "[2024-04-23T10:00:00Z] | 42.5000 kg -> 93.7000 lb";
         let item = parse_history_line(line).unwrap();
-        assert!((item.input_value - 42.5).abs() < f64::EPSILON);
+        assert_relative_eq(item.input_value, 42.5);
         assert_eq!(item.input_unit, "kg");
-        assert!((item.output_value - 93.7).abs() < f64::EPSILON);
+        assert_relative_eq(item.output_value, 93.7);
         assert_eq!(item.output_unit, "lb");
+    }
+
+    #[test]
+    fn parse_history_line_should_keep_timestamp_when_present() {
+        let line = "[2024-04-23T10:00:00Z] | 42.5000 kg -> 93.7000 lb";
+        let item = parse_history_line(line).unwrap();
+        let expected = DateTime::parse_from_rfc3339("2024-04-23T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(item.timestamp, Some(expected));
+    }
+
+    #[test]
+    fn parse_history_line_should_drop_unparseable_timestamp() {
+        let line = "[not-a-date] | 9.9999 x -> 9.9999 y";
+        let item = parse_history_line(line).unwrap();
+        assert_eq!(item.timestamp, None);
+    }
+
+    #[test]
+    fn relative_age_should_report_just_now_within_a_minute() {
+        let ts = Utc::now() - chrono::Duration::seconds(30);
+        assert_eq!(relative_age(ts), "just now");
+    }
+
+    #[test]
+    fn relative_age_should_report_minutes_under_an_hour() {
+        let ts = Utc::now() - chrono::Duration::minutes(5);
+        assert_eq!(relative_age(ts), "5m ago");
+    }
+
+    #[test]
+    fn relative_age_should_report_hours_under_a_day() {
+        let ts = Utc::now() - chrono::Duration::hours(2);
+        assert_eq!(relative_age(ts), "2h ago");
+    }
+
+    #[test]
+    fn relative_age_should_report_days_beyond_a_day() {
+        let ts = Utc::now() - chrono::Duration::days(3);
+        assert_eq!(relative_age(ts), "3d ago");
     }
 
     #[test]
@@ -288,14 +470,124 @@ mod tests {
         )
         .unwrap();
 
-        // Override path by parsing directly
-        let items: Vec<HistoryItem> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .filter_map(parse_history_line)
-            .collect();
+        let items = list_recent_at(&path, 10).unwrap();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[1].input_unit, "kg");
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_read_only_the_tail_of_a_large_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        let mut contents = String::new();
+        for i in 0..1000 {
+            let _ = writeln!(
+                contents,
+                "[2024-04-23T10:{i:02}:00Z] | {i}.0000 kg -> {i}.0000 lb"
+            );
+        }
+        std::fs::write(&path, contents).unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert_eq!(items.len(), 10);
+        assert_eq!(items[0].input_value, 999.0);
+        assert_eq!(items[9].input_value, 990.0);
+    }
+
+    #[test]
+    fn list_recent_at_should_keep_scanning_past_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\ngarbage\n[t2] | 2.0000 kg -> 4.4092 lb\n",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 2).unwrap();
+
+        // Both valid entries are returned newest-first despite the garbage
+        // line between them.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_handle_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\n[t2] | 2.0000 kg -> 4.4092 lb",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_survive_lines_spanning_chunk_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        let long_unit = "x".repeat(usize::try_from(TAIL_CHUNK_BYTES).unwrap() * 3);
+        let line = format!("[t1] | 1.0000 {long_unit} -> 2.0000 y");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let items = list_recent_at(&path, 5).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].input_unit, long_unit);
+    }
+
+    #[test]
+    fn list_recent_at_should_decode_utf8_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        // A log wider than one read chunk whose entry carries a multi-byte
+        // unit: decoding must happen per completed line, never mid-chunk.
+        let pad_len = usize::try_from(TAIL_CHUNK_BYTES).unwrap();
+        let padding = "p".repeat(pad_len);
+        std::fs::write(&path, format!("[t1] | 1.0000 {padding} -> 2.0000 m²\n")).unwrap();
+
+        let items = list_recent_at(&path, 5).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].output_unit, "m²");
+    }
+
+    #[test]
+    fn list_recent_at_should_return_empty_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(&path, "").unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn list_recent_at_should_cap_entries_when_limit_is_smaller_than_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\n[t2] | 2.0000 kg -> 4.4092 lb\n[t3] | 3.0000 s -> 3000 ms\n",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 2).unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_value, 3.0);
+        assert_eq!(items[1].input_value, 2.0);
     }
 
     #[tokio::test]
@@ -365,6 +657,38 @@ mod tests {
         assert_eq!(contents.lines().count(), 5);
         // Earliest entry is still present untouched — appends never prune.
         assert!(contents.contains("0.0000 kg -> 0.0000 lb"));
+    }
+
+    #[tokio::test]
+    async fn clear_history_at_should_empty_the_log_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[2024-04-23T10:00:00Z] | 1.0000 m -> 3.2808 ft\n[2024-04-24T10:00:00Z] | 2.0000 kg -> 4.4092 lb\n",
+        )
+        .unwrap();
+
+        clear_history_at(&path).await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.is_empty());
+
+        // The atomic wipe must not leave any leftover temp files behind.
+        let mut read_dir = tokio::fs::read_dir(dir.path()).await.unwrap();
+        while let Some(entry) = read_dir.next_entry().await.unwrap() {
+            assert!(!entry.file_name().to_string_lossy().ends_with(".tmp"));
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_history_at_should_succeed_when_log_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+
+        clear_history_at(&path).await.unwrap();
+
+        assert!(!path.exists());
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ fn should_accept_candidate(
 /// Bump when [`STATIC_UNITS`] gains rows, factor fixes, or new aliases so existing
 /// databases rewrite static entries. `add_unit_static` used to skip symbols that
 /// already existed, which left upgrades invisible.
-const STATIC_SEED_VERSION: u64 = 1;
+const STATIC_SEED_VERSION: u64 = 2;
 const STATIC_SEED_VERSION_KEY: &str = "static_seed_version";
 
 // Implement redb::Value for UnitEntry using bincode serialization.
@@ -347,6 +347,20 @@ impl Db {
             .context("Failed to read lowercase alias")?
         {
             return Ok(canonical.value().to_string());
+        }
+
+        // 3. Case-insensitive canonical match (e.g., "usd" -> "USD"). Currency
+        // codes have no aliases, so a casually typed lowercase code must still
+        // resolve to its stored form.
+        let units_table = read_txn
+            .open_table(UNITS_TABLE)
+            .context("Failed to open units table")?;
+        for result in units_table.iter().context("Failed to iterate units")? {
+            let (key, _) = result.context("Failed to read unit row")?;
+            let canonical = key.value();
+            if lower.eq_ignore_ascii_case(canonical) {
+                return Ok(canonical.to_string());
+            }
         }
 
         Ok(symbol.to_string())
@@ -657,7 +671,7 @@ const STATIC_UNITS: &[StaticUnit] = &[
         category: UnitCategory::Time,
         factor: 3600.0,
         offset: 0.0,
-        aliases: &["hour", "hours"],
+        aliases: &["hour", "hours", "hr"],
     },
     StaticUnit {
         symbol: "L",
@@ -952,6 +966,102 @@ const STATIC_UNITS: &[StaticUnit] = &[
         offset: 0.0,
         aliases: &["gigahertz"],
     },
+    // Compound/rate units (`numerator/denominator`). The stored factor is a
+    // placeholder: the converter recomputes every compound factor live from
+    // its component rows (`converter.rs::resolve_compound_factor`), so these
+    // rows only exist for discovery (unit picker), favorites, and lowercase
+    // alias resolution - never for math.
+    StaticUnit {
+        symbol: "USD/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/hour", "$/h"],
+    },
+    StaticUnit {
+        symbol: "EUR/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/hour"],
+    },
+    StaticUnit {
+        symbol: "PLN/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/hour"],
+    },
+    StaticUnit {
+        symbol: "USD/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/kilogram"],
+    },
+    StaticUnit {
+        symbol: "EUR/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/kilogram"],
+    },
+    StaticUnit {
+        symbol: "PLN/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/kilogram"],
+    },
+    StaticUnit {
+        symbol: "USD/lb",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/pound"],
+    },
+    StaticUnit {
+        symbol: "EUR/lb",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/pound"],
+    },
+    StaticUnit {
+        symbol: "USD/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/m²", "usd/sqm"],
+    },
+    StaticUnit {
+        symbol: "EUR/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/m²", "eur/sqm"],
+    },
+    StaticUnit {
+        symbol: "PLN/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/m²", "pln/sqm"],
+    },
+    StaticUnit {
+        symbol: "kWh/100km",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["kwh/100 km"],
+    },
+    StaticUnit {
+        symbol: "kWh/mi",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &[],
+    },
 ];
 
 fn seed_static_units(
@@ -1007,6 +1117,16 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Relative-tolerance float assertion: tolerance scales with magnitude so
+    /// tiny stored factors (e.g. 1/50000) don't fail on rounding error.
+    fn assert_relative_eq(a: f64, b: f64) {
+        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= tolerance,
+            "expected {a} to equal {b} within relative tolerance"
+        );
+    }
+
     #[test]
     fn test_db_update_priority() {
         let tmp_file = NamedTempFile::new().unwrap();
@@ -1022,7 +1142,7 @@ mod tests {
             .unwrap();
         let entry = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(entry.source, RateSource::Fiat as u8);
-        assert!((entry.factor - (1.0 / 50000.0)).abs() < f64::EPSILON);
+        assert_relative_eq(entry.factor, 1.0 / 50000.0);
 
         // 2. Insert Crypto rate (Higher priority)
         // 1 BTC = 51000 EUR
@@ -1060,14 +1180,14 @@ mod tests {
         assert_eq!(updated, 3);
 
         let usd = db.get_unit("USD").unwrap().unwrap();
-        assert!((usd.factor - (1.0 / 1.08)).abs() < f64::EPSILON);
+        assert_relative_eq(usd.factor, 1.0 / 1.08);
         assert_eq!(usd.source, RateSource::Fiat as u8);
 
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - 0.25).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 0.25);
 
         let gbp = db.get_unit("GBP").unwrap().unwrap();
-        assert!((gbp.factor - (1.0 / 0.85)).abs() < f64::EPSILON);
+        assert_relative_eq(gbp.factor, 1.0 / 0.85);
     }
 
     #[test]
@@ -1118,7 +1238,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         let ok = db.get_unit("OK").unwrap().unwrap();
-        assert!((ok.factor - 0.4).abs() < f64::EPSILON);
+        assert_relative_eq(ok.factor, 0.4);
         assert!(db.get_unit("NEG").unwrap().is_none());
         assert!(db.get_unit("NAN").unwrap().is_none());
         assert!(db.get_unit("INF").unwrap().is_none());
@@ -1167,7 +1287,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 1);
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 1.0 / 4.5);
 
         // Older timestamp, same source: should be skipped.
         let updated = db
@@ -1175,7 +1295,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 0);
         let pln = db.get_unit("PLN").unwrap().unwrap();
-        assert!((pln.factor - (1.0 / 4.5)).abs() < f64::EPSILON);
+        assert_relative_eq(pln.factor, 1.0 / 4.5);
     }
 
     #[test]
@@ -1394,7 +1514,7 @@ mod tests {
         assert!(updated.is_ok());
         let btc = db.get_unit("BTC").unwrap().unwrap();
         assert_eq!(btc.source, RateSource::Fiat as u8);
-        assert!((btc.factor - (1.0 / 48_000.0)).abs() < f64::EPSILON);
+        assert_relative_eq(btc.factor, 1.0 / 48_000.0);
     }
 
     #[test]
@@ -1439,7 +1559,7 @@ mod tests {
 
         let f = db.get_unit("F").unwrap().unwrap();
         assert_eq!(f.category, UnitCategory::Temperature as u8);
-        assert!((f.factor - 5.0 / 9.0).abs() < f64::EPSILON);
+        assert_relative_eq(f.factor, 5.0 / 9.0);
         assert_eq!(f.offset, -32.0);
 
         let litre = db.get_unit("L").unwrap().unwrap();
@@ -1456,12 +1576,12 @@ mod tests {
 
         db.update_unit("m", 99.0, 0.0, UnitCategory::Length, RateSource::Static)
             .unwrap();
-        assert!((db.get_unit("m").unwrap().unwrap().factor - 99.0).abs() < f64::EPSILON);
+        assert_relative_eq(db.get_unit("m").unwrap().unwrap().factor, 99.0);
 
         db.init_static_units().unwrap();
 
         let metres = db.get_unit("m").unwrap().unwrap();
-        assert!((metres.factor - 1.0).abs() < f64::EPSILON);
+        assert_relative_eq(metres.factor, 1.0);
         assert_eq!(db.resolve_symbol("meters").unwrap(), "m");
         assert!(db.get_unit("L").unwrap().is_some());
     }
@@ -1481,6 +1601,6 @@ mod tests {
         db.init_static_units().unwrap();
 
         let metres = db.get_unit("m").unwrap().unwrap();
-        assert!((metres.factor - 99.0).abs() < f64::EPSILON);
+        assert_relative_eq(metres.factor, 99.0);
     }
 }

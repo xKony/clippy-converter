@@ -43,12 +43,22 @@ pub struct Config {
     /// How to group thousands in displayed numbers (not used when copying).
     #[serde(default)]
     pub thousand_separator: ThousandSeparator,
+    /// Fixed decimal places shown everywhere (None = context-appropriate auto).
+    #[serde(default)]
+    pub display_decimals: Option<u8>,
+    /// Decimal places for copied values (None = full float repr).
+    #[serde(default)]
+    pub copy_decimals: Option<u8>,
     /// Optional extra unit groups. Core length/weight/temperature/time/currency stay on.
     #[serde(default)]
     pub unit_packs: UnitPacks,
     /// Write this executable into the current-user Windows Run key.
     #[serde(default)]
     pub start_with_windows: bool,
+    /// Currency every currency conversion is pinned to first when the input
+    /// carries no explicit target (`None` = off).
+    #[serde(default)]
+    pub default_currency_target: Option<String>,
 }
 
 /// Visual grouping of digits in displayed numbers.
@@ -130,6 +140,55 @@ pub fn sanitize_interval_mins(field: &'static str, mins: u64, default: u64) -> u
         );
         default
     }
+}
+
+/// Upper bound for user-configured decimal places.
+pub const MAX_DECIMALS: u8 = 10;
+
+/// Returns the configured decimal count when it is at most [`MAX_DECIMALS`],
+/// otherwise warns and falls back to `None` (auto).
+#[must_use]
+pub fn sanitize_decimals(field: &'static str, decimals: Option<u8>) -> Option<u8> {
+    match decimals {
+        None | Some(0..=MAX_DECIMALS) => decimals,
+        Some(too_many) => {
+            warn!(
+                field,
+                value = too_many,
+                max = MAX_DECIMALS,
+                "decimal place setting out of range; falling back to auto"
+            );
+            None
+        }
+    }
+}
+
+/// Inclusive length bounds for a user-configured default currency target:
+/// ISO fiat codes are 3 letters, but crypto tickers can run longer.
+const MIN_CURRENCY_TARGET_LEN: usize = 3;
+const MAX_CURRENCY_TARGET_LEN: usize = 8;
+
+/// Returns the uppercased currency code when it is 3..=8 ASCII alphanumeric
+/// characters. Empty (or whitespace-only) means off and stays silent;
+/// anything else warns and falls back to `None` (off).
+#[must_use]
+pub fn sanitize_currency_target(code: Option<&str>) -> Option<String> {
+    let trimmed = code
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())?;
+    // All-ASCII implies byte length == char count, so one length check suffices.
+    if trimmed.chars().all(|c| c.is_ascii_alphanumeric())
+        && (MIN_CURRENCY_TARGET_LEN..=MAX_CURRENCY_TARGET_LEN).contains(&trimmed.len())
+    {
+        return Some(trimmed.to_ascii_uppercase());
+    }
+    warn!(
+        value = trimmed,
+        min = MIN_CURRENCY_TARGET_LEN,
+        max = MAX_CURRENCY_TARGET_LEN,
+        "invalid default currency target; disabling"
+    );
+    None
 }
 
 /// Optional unit groups the user can toggle in Settings.
@@ -214,8 +273,11 @@ impl Default for Config {
             fiat_update_interval_mins: DEFAULT_FIAT_INTERVAL_MINS, // Daily
             crypto_update_interval_mins: DEFAULT_CRYPTO_INTERVAL_MINS, // Every hour
             thousand_separator: ThousandSeparator::None,
+            display_decimals: None,
+            copy_decimals: None,
             unit_packs: UnitPacks::default(),
             start_with_windows: false,
+            default_currency_target: None,
         }
     }
 }
@@ -277,6 +339,10 @@ impl Config {
             warn!(hotkey = %self.hotkey, "invalid hotkey in config; falling back to default");
             self.hotkey = DEFAULT_HOTKEY.to_string();
         }
+        self.display_decimals = sanitize_decimals("display_decimals", self.display_decimals);
+        self.copy_decimals = sanitize_decimals("copy_decimals", self.copy_decimals);
+        self.default_currency_target =
+            sanitize_currency_target(self.default_currency_target.as_deref());
         self
     }
 
@@ -356,6 +422,12 @@ pub enum UnitCategory {
     Angle = 13,
     /// Frequency (e.g., Hz, kHz).
     Frequency = 14,
+    /// Derived rate units composed as `numerator/denominator` (e.g., USD/h).
+    ///
+    /// Rows in this category carry placeholder factors only: the converter
+    /// recomputes compound factors live from their component rows so
+    /// currency-based rates stay fresh across API refreshes.
+    Compound = 15,
 }
 
 /// A unified rate/unit entry stored in the database.
@@ -541,6 +613,147 @@ mod tests {
     fn from_json_should_fall_back_to_defaults_for_wholly_corrupt_json() {
         let config = Config::from_json("{not valid json!!");
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn sanitized_should_salvage_out_of_range_decimal_places() {
+        let config = Config {
+            display_decimals: Some(11),
+            copy_decimals: Some(200),
+            ..Config::default()
+        };
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.display_decimals, None);
+        assert_eq!(sanitized.copy_decimals, None);
+    }
+
+    #[test]
+    fn decimals_should_default_to_auto_in_json() {
+        let config = Config::from_json("{}");
+        assert_eq!(config.display_decimals, None);
+        assert_eq!(config.copy_decimals, None);
+    }
+
+    #[test]
+    fn default_config_has_no_default_currency_target() {
+        assert_eq!(Config::default().default_currency_target, None);
+    }
+
+    #[test]
+    fn sanitized_should_disable_whitespace_only_currency_targets() {
+        for blank in ["", "   "] {
+            let config = Config {
+                default_currency_target: Some(blank.to_string()),
+                ..Config::default()
+            };
+            assert_eq!(
+                config.sanitized().default_currency_target,
+                None,
+                "input was {blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_should_uppercase_lowercase_currency_targets() {
+        let config = Config {
+            default_currency_target: Some(" pln ".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.sanitized().default_currency_target,
+            Some("PLN".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitized_should_keep_valid_currency_targets_untouched() {
+        for valid in ["PLN", "usdt", "ABCDEFGH"] {
+            let config = Config {
+                default_currency_target: Some(valid.to_string()),
+                ..Config::default()
+            };
+            assert_eq!(
+                config.sanitized().default_currency_target,
+                Some(valid.to_ascii_uppercase()),
+                "input was {valid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_should_salvage_overlong_currency_targets_to_off() {
+        let config = Config {
+            default_currency_target: Some("ABCDEFGHI".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.sanitized().default_currency_target, None);
+    }
+
+    #[test]
+    fn sanitized_should_salvage_non_alphanumeric_currency_targets_to_off() {
+        for bad in ["P LN", "PLN!", "PL€", "+48"] {
+            let config = Config {
+                default_currency_target: Some(bad.to_string()),
+                ..Config::default()
+            };
+            assert_eq!(
+                config.sanitized().default_currency_target,
+                None,
+                "input was {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_missing_default_currency_target_defaults_to_off() {
+        // Legacy config.json files predate the field and must load unchanged.
+        let json = r#"{
+            "favorites": [],
+            "hotkey": "Shift+Alt+C",
+            "list_size": 10,
+            "history_enabled": false,
+            "history_retention": "ThirtyDays",
+            "fiat_update_interval_mins": 1440,
+            "crypto_update_interval_mins": 60
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.default_currency_target, None);
+    }
+
+    #[test]
+    fn from_json_should_salvage_invalid_currency_targets_to_off() {
+        let json = format!(
+            r#"{{
+                "favorites": [],
+                "hotkey": "Shift+Alt+C",
+                "list_size": 10,
+                "history_enabled": false,
+                "history_retention": "ThirtyDays",
+                "fiat_update_interval_mins": 1440,
+                "crypto_update_interval_mins": 60,
+                "default_currency_target": "{}"
+            }}"#,
+            "x".repeat(MAX_CURRENCY_TARGET_LEN + 1)
+        );
+        let config = Config::from_json(&json);
+        assert_eq!(config.default_currency_target, None);
+    }
+
+    #[test]
+    fn from_json_should_uppercase_lowercase_currency_targets() {
+        let json = r#"{
+                "favorites": [],
+                "hotkey": "Shift+Alt+C",
+                "list_size": 10,
+                "history_enabled": false,
+                "history_retention": "ThirtyDays",
+                "fiat_update_interval_mins": 1440,
+                "crypto_update_interval_mins": 60,
+                "default_currency_target": "pln"
+            }"#;
+        let config = Config::from_json(json);
+        assert_eq!(config.default_currency_target, Some("PLN".to_string()));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use crate::clipboard::{CaptureOutcome, ClipboardManager};
 use crate::converter::Converter;
 use crate::db::Db;
-use crate::format::{format_copy, format_display};
-use crate::history::HistoryItem;
+use crate::format::{format_copy_precise, format_display};
+use crate::history::{HistoryItem, relative_age};
 use crate::hotkey;
 use crate::models::{
     self, Config, ConversionResult, HistoryRetention, ThousandSeparator, UnitInfo,
@@ -84,8 +84,14 @@ pub struct AppState {
 
     pub config_fiat_interval_str: String,
     pub config_crypto_interval_str: String,
+    /// Edit buffer for the default-currency-target setting; committed to the
+    /// config on focus loss like the interval strings above.
+    pub config_currency_target_str: String,
 
     pub history_tx: tokio::sync::mpsc::Sender<HistoryLogEntry>,
+
+    /// Signals the background runtime to wipe the history log file.
+    clear_history_tx: tokio::sync::mpsc::Sender<()>,
 
     /// Signals the background clipboard worker to capture the current selection.
     capture_req_tx: Sender<()>,
@@ -98,6 +104,8 @@ pub struct AppState {
     /// Receives freshly loaded recent history entries from the background worker.
     recent_res_rx: Receiver<Vec<HistoryItem>>,
     pub recent_history: Vec<HistoryItem>,
+    /// Filter query for the popup's Recent conversions list.
+    history_search: String,
 
     /// Query for which [`Self::unit_filter_results`] was computed; `None` forces a recompute.
     unit_filter_query: Option<String>,
@@ -163,6 +171,21 @@ fn apply_settings_viewport(ctx: &egui::Context) {
     });
 }
 
+/// Decides whether the default-currency-target setting applies to a parse
+/// result: only when the input carries no explicit target, is not a wall
+/// clock (whose target slot selects a timezone), and its source unit is a
+/// currency. Explicit targets always win.
+fn default_currency_pin(
+    config_code: Option<&str>,
+    parsed: &crate::parser::ParsedInput,
+    source_is_currency: bool,
+) -> Option<String> {
+    if parsed.target.is_some() || parsed.wall_clock.is_some() || !source_is_currency {
+        return None;
+    }
+    config_code.map(str::to_string)
+}
+
 /// Runs the eframe application.
 ///
 /// # Errors
@@ -185,8 +208,12 @@ pub fn run(config: Config, db: Db) -> Result<()> {
             .with_resizable(false)
             .with_inner_size([330.0, 400.0]),
         run_and_return: false,
-        vsync: true,
-        hardware_acceleration: eframe::HardwareAcceleration::Required,
+        // vsync stays on (GlowConfiguration default); keep hardware
+        // acceleration required so we never fall back to a software GL path.
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            hardware_acceleration: eframe::egui_glow::HardwareAcceleration::Required,
+            ..Default::default()
+        },
         // Glow (OpenGL) instead of Wgpu: the DX12 backend wgpu selects on
         // Windows allocates ~200+ MB of GPU memory pools for this tiny popup.
         renderer: eframe::Renderer::Glow,
@@ -221,6 +248,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     let fiat_str = config.fiat_update_interval_mins.to_string();
     let crypto_str = config.crypto_update_interval_mins.to_string();
+    let currency_target_str = config.default_currency_target.clone().unwrap_or_default();
 
     let (tx, rx) = mpsc::channel();
 
@@ -238,6 +266,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
     // Channel for sending history log entries to the background runtime
     let (history_tx, mut history_rx) = tokio::sync::mpsc::channel::<HistoryLogEntry>(64);
+    let (clear_history_tx, mut clear_history_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let retention_days_startup = config.history_retention.to_days();
 
@@ -282,6 +311,15 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                         .await
                         {
                             error!(error = %err, "failed to append history entry");
+                        }
+                    }
+                });
+
+                // Clear-all receiver — wipes the history log off the UI thread
+                tokio::spawn(async move {
+                    while clear_history_rx.recv().await.is_some() {
+                        if let Err(err) = crate::history::clear_history().await {
+                            error!(error = %err, "failed to clear history log");
                         }
                     }
                 });
@@ -403,7 +441,9 @@ pub fn run(config: Config, db: Db) -> Result<()> {
 
                 config_fiat_interval_str: fiat_str,
                 config_crypto_interval_str: crypto_str,
+                config_currency_target_str: currency_target_str,
                 history_tx,
+                clear_history_tx,
 
                 capture_req_tx,
                 capture_res_rx,
@@ -411,6 +451,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 recent_req_tx,
                 recent_res_rx,
                 recent_history: Vec::new(),
+                history_search: String::new(),
                 unit_filter_query: None,
                 unit_filter_results: Vec::new(),
                 list_cursor: 0,
@@ -436,6 +477,7 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn fmt_num(&self, value: f64, precision: usize) -> String {
+        let precision = self.config.display_decimals.map_or(precision, usize::from);
         format_display(value, precision, self.config.thousand_separator)
     }
 
@@ -663,6 +705,13 @@ impl AppState {
         }
     }
 
+    /// Commits the default-currency-target text field into the config;
+    /// invalid codes fall back to off inside [`models::sanitize_currency_target`].
+    fn apply_default_currency_target(&mut self) {
+        self.config.default_currency_target =
+            models::sanitize_currency_target(Some(&self.config_currency_target_str));
+    }
+
     fn log_conversion_if_enabled(&self) {
         if self.config.history_enabled
             && let Some(result) = &self.current_result
@@ -686,6 +735,7 @@ impl AppState {
         self.captured_value = 0.0;
         self.search_query.clear();
         self.search_query_lower.clear();
+        self.history_search.clear();
         self.list_cursor = 0;
     }
 
@@ -753,7 +803,8 @@ impl AppState {
             self.copied_notification = Some(("Invalid value".to_string(), Instant::now()));
             return;
         }
-        if self.clipboard.set_text(format_copy(value)).is_ok() {
+        let text = format_copy_precise(value, self.config.copy_decimals.map(usize::from));
+        if self.clipboard.set_text(text).is_ok() {
             self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
             if dismiss {
                 self.main_window_open = false;
@@ -831,7 +882,7 @@ impl AppState {
         };
 
         if let Ok(parsed) = parsed {
-            self.apply_parsed_input(parsed);
+            self.apply_parsed_input(&parsed);
         } else {
             self.captured_value = 0.0;
             self.current_result = None;
@@ -841,27 +892,58 @@ impl AppState {
         self.focus_main_input = true;
     }
 
-    fn apply_parsed_input(&mut self, parsed: crate::parser::ParsedInput) {
+    fn apply_parsed_input(&mut self, parsed: &crate::parser::ParsedInput) {
         self.captured_value = parsed.value;
-        let Some(unit) = parsed.unit else {
+        let Some(unit) = parsed.unit.as_deref() else {
             self.current_result = None;
             self.current_mode = WindowMode::SourceUnitSelection;
             return;
         };
 
-        if let Ok(result) =
-            self.converter
-                .convert_preferring(parsed.value, &unit, parsed.target.as_deref())
+        let patched = self.patched_with_default_currency_target(parsed);
+        if let Ok(result) = self
+            .converter
+            .convert_parsed(patched.as_ref().unwrap_or(parsed))
         {
             self.current_result = Some(result);
             self.current_mode = WindowMode::Results;
             self.log_conversion_if_enabled();
         } else {
-            self.search_query = unit;
+            self.search_query = unit.to_string();
             self.search_query_lower = self.search_query.to_lowercase();
             self.current_result = None;
             self.current_mode = WindowMode::SourceUnitSelection;
         }
+    }
+
+    /// Clones-and-patches `parsed` when the default-currency-target setting
+    /// should act like a typed `to <code>` clause. The decision lives here
+    /// rather than inside `Converter` because every input it needs (the
+    /// setting plus the DB-backed category lookups) is already available on
+    /// `AppState`, keeping the converter's range and wall-clock paths
+    /// untouched. A configured code that is not a known currency is ignored
+    /// with one warning instead of failing every conversion.
+    fn patched_with_default_currency_target(
+        &self,
+        parsed: &crate::parser::ParsedInput,
+    ) -> Option<crate::parser::ParsedInput> {
+        let source_is_currency = parsed
+            .unit
+            .as_deref()
+            .is_some_and(|unit| self.converter.is_currency_unit(unit));
+        let code = default_currency_pin(
+            self.config.default_currency_target.as_deref(),
+            parsed,
+            source_is_currency,
+        )?;
+        if !self.converter.is_currency_unit(&code) {
+            warn!(code = %code, "default currency target does not name a known currency; ignoring");
+            return None;
+        }
+
+        let mut pinned = parsed.clone();
+        pinned.target = Some(code);
+        Some(pinned)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -961,6 +1043,46 @@ impl AppState {
             }
         });
 
+        ui.add_space(4.0);
+
+        // Fixed decimal places for displayed and copied values. Toggling Auto
+        // writes back immediately; the drag fields only exist when pinned.
+        ui.label("Decimal places (Auto adapts per context)");
+        ui.horizontal(|ui| {
+            let mut changed = false;
+
+            ui.label("Display:");
+            let mut display_auto = self.config.display_decimals.is_none();
+            if ui.checkbox(&mut display_auto, "Auto").changed() {
+                self.config.display_decimals = if display_auto { None } else { Some(2) };
+                changed = true;
+            }
+            if let Some(decimals) = self.config.display_decimals.as_mut() {
+                let widget = egui::DragValue::new(decimals)
+                    .range(0..=crate::models::MAX_DECIMALS)
+                    .suffix(" digits");
+                changed |= ui.add(widget).changed();
+            }
+
+            ui.add_space(8.0);
+            ui.label("Copy:");
+            let mut copy_auto = self.config.copy_decimals.is_none();
+            if ui.checkbox(&mut copy_auto, "Auto").changed() {
+                self.config.copy_decimals = if copy_auto { None } else { Some(2) };
+                changed = true;
+            }
+            if let Some(decimals) = self.config.copy_decimals.as_mut() {
+                let widget = egui::DragValue::new(decimals)
+                    .range(0..=crate::models::MAX_DECIMALS)
+                    .suffix(" digits");
+                changed |= ui.add(widget).changed();
+            }
+
+            if changed {
+                self.persist_config();
+            }
+        });
+
         ui.separator();
 
         if ui
@@ -996,6 +1118,12 @@ impl AppState {
                     self.persist_config();
                 }
             });
+            if ui.button("Clear All History").clicked() {
+                if self.clear_history_tx.try_send(()).is_err() {
+                    error!("failed to queue history clear");
+                }
+                self.recent_history.clear();
+            }
         }
 
         if ui.button("Open History Folder").clicked()
@@ -1054,9 +1182,28 @@ impl AppState {
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Default currency target:");
+            let target = ui.add(
+                egui::TextEdit::singleline(&mut self.config_currency_target_str)
+                    .hint_text("e.g. PLN (off when empty)")
+                    .desired_width(96.0),
+            );
+            if target.lost_focus() {
+                self.apply_default_currency_target();
+                self.persist_config();
+            }
+        });
+        ui.label(
+            egui::RichText::new("Currencies convert to this code first; explicit targets win.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+
         ui.separator();
         if ui.button("Save & Apply").clicked() {
             self.apply_interval_fields();
+            self.apply_default_currency_target();
             if self.recorded_hotkey.is_some() {
                 self.apply_recorded_hotkey();
             } else {
@@ -1173,7 +1320,7 @@ impl AppState {
                 if ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && let Ok(parsed) = crate::parser::parse_input(&self.manual_input_value)
                 {
-                    self.apply_parsed_input(parsed);
+                    self.apply_parsed_input(&parsed);
                     self.focus_main_input = true;
                 }
             });
@@ -1487,6 +1634,32 @@ impl AppState {
                 .color(ui.visuals().weak_text_color()),
         );
 
+        let query_lower = self.history_search.to_lowercase();
+        let visible: Vec<(usize, &HistoryItem)> = self
+            .recent_history
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| Self::history_matches(item, &query_lower))
+            .collect();
+
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.history_search)
+                    .hint_text("Search history...")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+
+        if visible.is_empty() {
+            ui.label(
+                egui::RichText::new("No matching conversions")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+            return;
+        }
+
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let max_list_height = row_height * 5.5;
 
@@ -1498,7 +1671,7 @@ impl AppState {
                 ui.set_width(ui.max_rect().width());
                 let mut clicked_idx: Option<usize> = None;
                 let mut copy_idx: Option<usize> = None;
-                for (idx, item) in self.recent_history.iter().enumerate() {
+                for (idx, item) in visible {
                     ui.horizontal(|ui| {
                         let row = self.history_row(ui, item);
                         if row.clicked() {
@@ -1508,6 +1681,13 @@ impl AppState {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Copy").clicked() {
                                 copy_idx = Some(idx);
+                            }
+                            if let Some(timestamp) = item.timestamp {
+                                ui.label(
+                                    egui::RichText::new(relative_age(timestamp))
+                                        .small()
+                                        .color(ui.visuals().weak_text_color()),
+                                );
                             }
                         });
                     });
@@ -1524,13 +1704,27 @@ impl AppState {
         if let Some(idx) = history_action.inner.1
             && let Some(item) = self.recent_history.get(idx)
         {
-            let text = Self::history_output_text(item);
+            let text = self.history_output_text(item);
             if self.clipboard.set_text(text).is_ok() {
                 self.copied_notification = Some(("Copied!".to_string(), Instant::now()));
             }
         }
 
         ui.add_space(6.0);
+    }
+
+    /// Case-insensitive substring match of a history row against the Recent
+    /// filter query; an empty query matches everything.
+    fn history_matches(item: &HistoryItem, query_lower: &str) -> bool {
+        if query_lower.is_empty() {
+            return true;
+        }
+        format!(
+            "{} {} {} {}",
+            item.input_value, item.input_unit, item.output_value, item.output_unit
+        )
+        .to_lowercase()
+        .contains(query_lower)
     }
 
     /// Renders one recent row with a painted arrow (default font lacks Unicode →).
@@ -1572,8 +1766,12 @@ impl AppState {
         p.line_segment([egui::pos2(right, y), egui::pos2(tip, y + 4.0)], stroke);
     }
 
-    fn history_output_text(item: &HistoryItem) -> String {
-        format!("{} {}", format_copy(item.output_value), item.output_unit)
+    fn history_output_text(&self, item: &HistoryItem) -> String {
+        let value = format_copy_precise(
+            item.output_value,
+            self.config.copy_decimals.map(usize::from),
+        );
+        format!("{value} {}", item.output_unit)
     }
 
     fn reopen_history_item(&mut self, item: &HistoryItem) {
@@ -1666,4 +1864,60 @@ pub fn format_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<Strin
 
     parts.push(key_str);
     Some(parts.join("+"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{ParsedInput, ResolvedZone, WallClock};
+
+    /// A plain currency parse result (`100 USD`); individual tests override
+    /// the fields their scenario needs.
+    fn currency_parsed(target: Option<&str>) -> ParsedInput {
+        ParsedInput {
+            value: 100.0,
+            end_value: None,
+            unit: Some("USD".to_string()),
+            target: target.map(str::to_string),
+            wall_clock: None,
+        }
+    }
+
+    #[test]
+    fn default_currency_pin_should_apply_without_explicit_target() {
+        let parsed = currency_parsed(None);
+        assert_eq!(
+            default_currency_pin(Some("PLN"), &parsed, true),
+            Some("PLN".to_string())
+        );
+    }
+
+    #[test]
+    fn default_currency_pin_should_keep_explicit_targets_over_the_setting() {
+        let parsed = currency_parsed(Some("EUR"));
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, true), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_skip_wall_clock_payloads() {
+        // A wall-clock target slot selects a timezone, never a currency.
+        let mut parsed = currency_parsed(None);
+        parsed.wall_clock = Some(WallClock {
+            epoch_seconds: 0,
+            source_zone: ResolvedZone::Utc,
+        });
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, true), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_not_fire_for_non_currency_sources() {
+        let parsed = currency_parsed(None);
+        assert_eq!(default_currency_pin(Some("PLN"), &parsed, false), None);
+    }
+
+    #[test]
+    fn default_currency_pin_should_stay_off_when_the_setting_is_none() {
+        let parsed = currency_parsed(None);
+        assert_eq!(default_currency_pin(None, &parsed, true), None);
+    }
 }
