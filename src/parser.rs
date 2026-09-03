@@ -714,6 +714,14 @@ fn finalize_unit_and_target(
     }
 
     let (source, target) = split_source_target(unit_str);
+    // `$100/hr`: a leading currency glyph followed by a bare `/rate` fragment
+    // joins into one compound unit (`USD/hr`) instead of appending the
+    // currency behind the slash (`/hr USD`).
+    if let Some(sym) = symbol_unit
+        && let Some(rate) = source.as_deref().filter(|s| s.starts_with('/'))
+    {
+        return (Some(format!("{sym}{rate}")), target);
+    }
     let unit = match (source.as_deref(), symbol_unit) {
         (None, None) => None,
         (Some(s), None) => Some(s.to_string()),
@@ -833,6 +841,28 @@ mod tests {
         assert!(parse_input("abc").is_err());
         assert!(parse_input("").is_err());
         assert!(parse_input("$").is_err());
+    }
+
+    #[test]
+    fn dollar_glyph_with_rate_fragment_joins_the_currency() {
+        let res = parse_input("$100/hr").unwrap();
+        assert_eq!(res.value, 100.0);
+        assert_eq!(res.unit, Some("USD/hr".to_string()));
+    }
+
+    #[test]
+    fn compound_source_and_target_parse_without_a_glyph() {
+        let res = parse_input("10 USD/kg to USD/lb").unwrap();
+        assert_eq!(res.value, 10.0);
+        assert_eq!(res.unit, Some("USD/kg".to_string()));
+        assert_eq!(res.target, Some("USD/lb".to_string()));
+    }
+
+    #[test]
+    fn counted_denominator_passes_through_to_the_converter() {
+        let res = parse_input("100 kWh/100km").unwrap();
+        assert_eq!(res.value, 100.0);
+        assert_eq!(res.unit, Some("kWh/100km".to_string()));
     }
 
     #[test]

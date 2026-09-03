@@ -425,6 +425,12 @@ pub enum UnitCategory {
     Angle = 13,
     /// Frequency (e.g., Hz, kHz).
     Frequency = 14,
+    /// Derived rate units composed as `numerator/denominator` (e.g., USD/h).
+    ///
+    /// Rows in this category carry placeholder factors only: the converter
+    /// recomputes compound factors live from their component rows so
+    /// currency-based rates stay fresh across API refreshes.
+    Compound = 15,
 }
 
 /// A unified rate/unit entry stored in the database.

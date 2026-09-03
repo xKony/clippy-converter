@@ -63,7 +63,7 @@ fn should_accept_candidate(
 /// Bump when [`STATIC_UNITS`] gains rows, factor fixes, or new aliases so existing
 /// databases rewrite static entries. `add_unit_static` used to skip symbols that
 /// already existed, which left upgrades invisible.
-const STATIC_SEED_VERSION: u64 = 1;
+const STATIC_SEED_VERSION: u64 = 2;
 const STATIC_SEED_VERSION_KEY: &str = "static_seed_version";
 
 // Implement redb::Value for UnitEntry using bincode serialization.
@@ -671,7 +671,7 @@ const STATIC_UNITS: &[StaticUnit] = &[
         category: UnitCategory::Time,
         factor: 3600.0,
         offset: 0.0,
-        aliases: &["hour", "hours"],
+        aliases: &["hour", "hours", "hr"],
     },
     StaticUnit {
         symbol: "L",
@@ -965,6 +965,102 @@ const STATIC_UNITS: &[StaticUnit] = &[
         factor: 1_000_000_000.0,
         offset: 0.0,
         aliases: &["gigahertz"],
+    },
+    // Compound/rate units (`numerator/denominator`). The stored factor is a
+    // placeholder: the converter recomputes every compound factor live from
+    // its component rows (`converter.rs::resolve_compound_factor`), so these
+    // rows only exist for discovery (unit picker), favorites, and lowercase
+    // alias resolution - never for math.
+    StaticUnit {
+        symbol: "USD/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/hour", "$/h"],
+    },
+    StaticUnit {
+        symbol: "EUR/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/hour"],
+    },
+    StaticUnit {
+        symbol: "PLN/h",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/hour"],
+    },
+    StaticUnit {
+        symbol: "USD/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/kilogram"],
+    },
+    StaticUnit {
+        symbol: "EUR/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/kilogram"],
+    },
+    StaticUnit {
+        symbol: "PLN/kg",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/kilogram"],
+    },
+    StaticUnit {
+        symbol: "USD/lb",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/pound"],
+    },
+    StaticUnit {
+        symbol: "EUR/lb",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/pound"],
+    },
+    StaticUnit {
+        symbol: "USD/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["usd/m²", "usd/sqm"],
+    },
+    StaticUnit {
+        symbol: "EUR/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["eur/m²", "eur/sqm"],
+    },
+    StaticUnit {
+        symbol: "PLN/m2",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["pln/m²", "pln/sqm"],
+    },
+    StaticUnit {
+        symbol: "kWh/100km",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &["kwh/100 km"],
+    },
+    StaticUnit {
+        symbol: "kWh/mi",
+        category: UnitCategory::Compound,
+        factor: 1.0,
+        offset: 0.0,
+        aliases: &[],
     },
 ];
 

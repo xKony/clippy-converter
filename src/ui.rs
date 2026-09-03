@@ -104,6 +104,8 @@ pub struct AppState {
     /// Receives freshly loaded recent history entries from the background worker.
     recent_res_rx: Receiver<Vec<HistoryItem>>,
     pub recent_history: Vec<HistoryItem>,
+    /// Filter query for the popup's Recent conversions list.
+    history_search: String,
 
     /// Query for which [`Self::unit_filter_results`] was computed; `None` forces a recompute.
     unit_filter_query: Option<String>,
@@ -449,6 +451,7 @@ pub fn run(config: Config, db: Db) -> Result<()> {
                 recent_req_tx,
                 recent_res_rx,
                 recent_history: Vec::new(),
+                history_search: String::new(),
                 unit_filter_query: None,
                 unit_filter_results: Vec::new(),
                 list_cursor: 0,
@@ -732,6 +735,7 @@ impl AppState {
         self.captured_value = 0.0;
         self.search_query.clear();
         self.search_query_lower.clear();
+        self.history_search.clear();
         self.list_cursor = 0;
     }
 
@@ -1630,6 +1634,32 @@ impl AppState {
                 .color(ui.visuals().weak_text_color()),
         );
 
+        let query_lower = self.history_search.to_lowercase();
+        let visible: Vec<(usize, &HistoryItem)> = self
+            .recent_history
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| Self::history_matches(item, &query_lower))
+            .collect();
+
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.history_search)
+                    .hint_text("Search history...")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+
+        if visible.is_empty() {
+            ui.label(
+                egui::RichText::new("No matching conversions")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+            return;
+        }
+
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let max_list_height = row_height * 5.5;
 
@@ -1641,7 +1671,7 @@ impl AppState {
                 ui.set_width(ui.max_rect().width());
                 let mut clicked_idx: Option<usize> = None;
                 let mut copy_idx: Option<usize> = None;
-                for (idx, item) in self.recent_history.iter().enumerate() {
+                for (idx, item) in visible {
                     ui.horizontal(|ui| {
                         let row = self.history_row(ui, item);
                         if row.clicked() {
@@ -1681,6 +1711,20 @@ impl AppState {
         }
 
         ui.add_space(6.0);
+    }
+
+    /// Case-insensitive substring match of a history row against the Recent
+    /// filter query; an empty query matches everything.
+    fn history_matches(item: &HistoryItem, query_lower: &str) -> bool {
+        if query_lower.is_empty() {
+            return true;
+        }
+        format!(
+            "{} {} {} {}",
+            item.input_value, item.input_unit, item.output_value, item.output_unit
+        )
+        .to_lowercase()
+        .contains(query_lower)
     }
 
     /// Renders one recent row with a painted arrow (default font lacks Unicode →).

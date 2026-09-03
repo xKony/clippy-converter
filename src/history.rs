@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt, BufReader as AsyncBufReader};
@@ -22,30 +22,89 @@ pub struct HistoryItem {
     pub output_unit: String,
 }
 
+/// Byte size of one backward read step when scanning the history tail.
+const TAIL_CHUNK_BYTES: u64 = 8 * 1024;
+
 /// Returns the most recent history entries (newest first), up to `limit`.
 ///
+/// The log is scanned backwards in chunks so a large file (possible when
+/// retention is `Never`) costs a few KiB of I/O per popup open instead of a
+/// full-file read.
+///
 /// # Errors
-/// Returns an error if the history file cannot be read.
+/// Returns an error if the history file cannot be opened or read.
 pub fn list_recent(limit: usize) -> Result<Vec<HistoryItem>> {
     let path = get_history_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
+    list_recent_at(&path, limit)
+}
 
-    let file = fs::File::open(&path)
-        .with_context(|| format!("Failed to open history log at {}", path.display()))?;
-    let reader = BufReader::new(file);
-
-    let mut items = Vec::new();
-    for line in reader.lines() {
-        let line = line.context("Failed to read history line")?;
-        if let Some(item) = parse_history_line(&line) {
-            items.push(item);
-        }
+/// Testable core of [`list_recent`], parameterized over an explicit path so
+/// the bounded tail read can be exercised against a temp directory in tests.
+fn list_recent_at(path: &Path, limit: usize) -> Result<Vec<HistoryItem>> {
+    if limit == 0 {
+        return Ok(Vec::new());
     }
 
-    let skip = items.len().saturating_sub(limit);
-    Ok(items.into_iter().skip(skip).rev().collect())
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("Failed to open history log at {}", path.display()))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("Failed to stat history log at {}", path.display()))?
+        .len();
+
+    let mut items: Vec<HistoryItem> = Vec::with_capacity(limit.min(64));
+    // Bytes of the earliest line seen so far that may not be complete yet; it
+    // is terminated either by the next (leftward) chunk or by the file start.
+    let mut fragment: Vec<u8> = Vec::new();
+    let mut end = len;
+
+    while end > 0 && items.len() < limit {
+        let start = end.saturating_sub(TAIL_CHUNK_BYTES);
+        let chunk_len =
+            usize::try_from(end - start).context("history log size exceeds platform limits")?;
+        let mut buf = vec![0_u8; chunk_len];
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| file.read_exact(&mut buf))
+            .with_context(|| format!("Failed to read history log at {}", path.display()))?;
+
+        // Walk the window right-to-left, closing one line at each newline
+        // byte. Splitting happens on raw bytes (`b'\n'` is ASCII) and each
+        // finished line is decoded whole, so multi-byte UTF-8 units such as
+        // `m²` are never corrupted by a chunk boundary.
+        let mut cursor = buf.len();
+        while items.len() < limit {
+            let Some(nl) = buf[..cursor].iter().rposition(|&b| b == b'\n') else {
+                // No newline left in this window: everything scanned so
+                // far belongs to one still-open line.
+                let mut joined = Vec::with_capacity(cursor + fragment.len());
+                joined.extend_from_slice(&buf[..cursor]);
+                joined.append(&mut fragment);
+                fragment = joined;
+                break;
+            };
+            let mut line = Vec::from(&buf[nl + 1..cursor]);
+            line.extend_from_slice(&fragment);
+            fragment.clear();
+            if let Some(item) = parse_history_line(&String::from_utf8_lossy(&line)) {
+                items.push(item);
+            }
+            cursor = nl;
+        }
+        end = start;
+    }
+
+    // The first line of the file has no preceding newline; it only terminates
+    // once the scan reaches the very start.
+    if items.len() < limit
+        && let Some(item) = parse_history_line(&String::from_utf8_lossy(&fragment))
+    {
+        items.push(item);
+    }
+
+    Ok(items)
 }
 
 fn parse_history_line(line: &str) -> Option<HistoryItem> {
@@ -332,6 +391,7 @@ pub fn get_history_path() -> Result<PathBuf> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
+    use std::fmt::Write as _;
 
     /// Relative-tolerance float assertion for test expectations.
     fn assert_relative_eq(a: f64, b: f64) {
@@ -410,14 +470,124 @@ mod tests {
         )
         .unwrap();
 
-        // Override path by parsing directly
-        let items: Vec<HistoryItem> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .filter_map(parse_history_line)
-            .collect();
+        let items = list_recent_at(&path, 10).unwrap();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[1].input_unit, "kg");
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_read_only_the_tail_of_a_large_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        let mut contents = String::new();
+        for i in 0..1000 {
+            let _ = writeln!(
+                contents,
+                "[2024-04-23T10:{i:02}:00Z] | {i}.0000 kg -> {i}.0000 lb"
+            );
+        }
+        std::fs::write(&path, contents).unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert_eq!(items.len(), 10);
+        assert_eq!(items[0].input_value, 999.0);
+        assert_eq!(items[9].input_value, 990.0);
+    }
+
+    #[test]
+    fn list_recent_at_should_keep_scanning_past_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\ngarbage\n[t2] | 2.0000 kg -> 4.4092 lb\n",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 2).unwrap();
+
+        // Both valid entries are returned newest-first despite the garbage
+        // line between them.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_handle_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\n[t2] | 2.0000 kg -> 4.4092 lb",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_unit, "kg");
+        assert_eq!(items[1].input_unit, "m");
+    }
+
+    #[test]
+    fn list_recent_at_should_survive_lines_spanning_chunk_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        let long_unit = "x".repeat(usize::try_from(TAIL_CHUNK_BYTES).unwrap() * 3);
+        let line = format!("[t1] | 1.0000 {long_unit} -> 2.0000 y");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let items = list_recent_at(&path, 5).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].input_unit, long_unit);
+    }
+
+    #[test]
+    fn list_recent_at_should_decode_utf8_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        // A log wider than one read chunk whose entry carries a multi-byte
+        // unit: decoding must happen per completed line, never mid-chunk.
+        let pad_len = usize::try_from(TAIL_CHUNK_BYTES).unwrap();
+        let padding = "p".repeat(pad_len);
+        std::fs::write(&path, format!("[t1] | 1.0000 {padding} -> 2.0000 m²\n")).unwrap();
+
+        let items = list_recent_at(&path, 5).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].output_unit, "m²");
+    }
+
+    #[test]
+    fn list_recent_at_should_return_empty_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(&path, "").unwrap();
+
+        let items = list_recent_at(&path, 10).unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn list_recent_at_should_cap_entries_when_limit_is_smaller_than_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "[t1] | 1.0000 m -> 3.2808 ft\n[t2] | 2.0000 kg -> 4.4092 lb\n[t3] | 3.0000 s -> 3000 ms\n",
+        )
+        .unwrap();
+
+        let items = list_recent_at(&path, 2).unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].input_value, 3.0);
+        assert_eq!(items[1].input_value, 2.0);
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::models::{Config, ConversionResult, ConvertedValue, UnitInfo};
+use crate::models::{Config, ConversionResult, ConvertedValue, UnitEntry, UnitInfo};
 use crate::parser::{ParsedInput, ResolvedZone, WallClock, resolve_zone};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Local, Offset, TimeZone, Timelike, Utc};
@@ -130,6 +130,105 @@ impl Converter {
         self.convert_preferring(value, from_input, None)
     }
 
+    /// Resolves one side of a compound unit to its current entry, accepting
+    /// metric-prefixed (`kilo`) and counted (`100km`) fragments. Returns `None`
+    /// when the fragment does not name a usable unit; currency rows are never
+    /// reached through prefix/count fallbacks, mirroring the single-unit path.
+    fn lookup_component(&self, fragment: &str) -> Result<Option<UnitEntry>> {
+        if let Ok(resolved) = self.db.resolve_symbol(fragment)
+            && let Ok(Some(entry)) = self.db.get_unit(&resolved)
+        {
+            return Ok(Some(entry));
+        }
+        let scaled = extract_metric_prefix(fragment).or_else(|| leading_count_factor(fragment));
+        if let Some((scale, rest)) = scaled
+            && let Ok(resolved) = self.db.resolve_symbol(rest)
+            && let Ok(Some(mut entry)) = self.db.get_unit(&resolved)
+            && entry.category != crate::models::UnitCategory::Currency as u8
+        {
+            entry.factor *= scale;
+            return Ok(Some(entry));
+        }
+        Ok(None)
+    }
+
+    /// Computes the live factor of a compound unit from its components:
+    /// `factor(numerator) / factor(denominator)`. Returns `None` when either
+    /// side is missing or unusable in a linear ratio (affine units such as
+    /// temperature, zero/non-finite factors).
+    fn resolve_compound_factor(&self, numerator: &str, denominator: &str) -> Result<Option<f64>> {
+        let Some(num) = self.lookup_component(numerator)? else {
+            return Ok(None);
+        };
+        let Some(den) = self.lookup_component(denominator)? else {
+            return Ok(None);
+        };
+        if num.offset != 0.0 || den.offset != 0.0 {
+            // Affine units break the linear-ratio model.
+            return Ok(None);
+        }
+        if num.factor == 0.0
+            || den.factor == 0.0
+            || !num.factor.is_finite()
+            || !den.factor.is_finite()
+        {
+            return Ok(None);
+        }
+        Ok(Some(num.factor / den.factor))
+    }
+
+    /// Category of a compound component, used to keep output families coherent
+    /// so price-per-mass converts to price-per-mass and wages to wages.
+    fn component_category(&self, fragment: &str) -> Option<u8> {
+        self.lookup_component(fragment)
+            .ok()
+            .flatten()
+            .map(|entry| entry.category)
+    }
+
+    /// Fills `outputs` with sibling compound units: seeded `Compound` rows
+    /// whose numerator and denominator categories both match the source's.
+    /// Target factors are recomposed live exactly like the source's, ignoring
+    /// the placeholder factors stored on the seeded rows.
+    fn push_compound_outputs(
+        &self,
+        outputs: &mut Vec<ConvertedValue>,
+        base_value: f64,
+        from_unit: &str,
+        numerator: &str,
+        denominator: &str,
+    ) -> Result<()> {
+        let Some(num_cat) = self.component_category(numerator) else {
+            return Ok(());
+        };
+        let Some(den_cat) = self.component_category(denominator) else {
+            return Ok(());
+        };
+        let siblings = self
+            .db
+            .get_category_units(crate::models::UnitCategory::Compound as u8)?;
+        for (symbol, _placeholder) in siblings {
+            if symbol == from_unit {
+                continue;
+            }
+            let Some((target_num, target_den)) = decompose_compound(&symbol) else {
+                continue;
+            };
+            if self.component_category(target_num) != Some(num_cat)
+                || self.component_category(target_den) != Some(den_cat)
+            {
+                continue;
+            }
+            if let Some(target_factor) = self.resolve_compound_factor(target_num, target_den)? {
+                outputs.push(ConvertedValue {
+                    value: base_value / target_factor,
+                    unit: symbol,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Like [`Self::convert`], but pins `prefer` at the front of the output list
     /// when that symbol exists in the same category.
     ///
@@ -173,22 +272,65 @@ impl Converter {
                 entry_opt = Some(rest_entry);
             }
         }
+
+        // 3. Compound/rate units (`USD/kg`, `kWh/100km`). Seeded rows exist for
+        // discovery but carry placeholder factors only, so whenever a
+        // Compound-category row (or an unseeded `/` fragment) shows up, the
+        // factor is recomposed live from the current component rows - keeping
+        // currency-based rates fresh across API refreshes.
+        let is_compound_row = entry_opt
+            .as_ref()
+            .is_some_and(|e| e.category == crate::models::UnitCategory::Compound as u8);
+        let mut compound_parts = None;
+        if (is_compound_row || entry_opt.is_none())
+            && let Some((numerator, denominator)) = decompose_compound(parsed_unit)
+        {
+            match self.resolve_compound_factor(numerator, denominator)? {
+                Some(factor) => {
+                    entry_opt = Some(UnitEntry {
+                        factor,
+                        offset: 0.0,
+                        category: crate::models::UnitCategory::Compound as u8,
+                        timestamp: 0,
+                        source: crate::models::RateSource::Static as u8,
+                    });
+                    compound_parts = Some((numerator, denominator));
+                }
+                // A seeded compound whose components fail to resolve (no
+                // rates cached yet, temperature denominator) must not fall
+                // back to its placeholder factor.
+                None if is_compound_row => {
+                    return Err(anyhow!("Unknown unit: {from_input}"));
+                }
+                None => {}
+            }
+        }
         let entry = entry_opt.ok_or_else(|| anyhow!("Unknown unit: {from_input}"))?;
 
         // Math: Base = (Input + Offset) * Factor
         let base_value = (actual_value + entry.offset) * entry.factor;
 
         let mut outputs = Vec::new();
-        let targets = self.db.get_category_units(entry.category)?;
+        if let Some((numerator, denominator)) = compound_parts {
+            self.push_compound_outputs(
+                &mut outputs,
+                base_value,
+                &from_unit,
+                numerator,
+                denominator,
+            )?;
+        } else {
+            let targets = self.db.get_category_units(entry.category)?;
 
-        for (symbol, target_entry) in targets {
-            if symbol != from_unit {
-                // Math: Target = (Base / Factor) - Offset
-                let target_val = (base_value / target_entry.factor) - target_entry.offset;
-                outputs.push(ConvertedValue {
-                    value: target_val,
-                    unit: symbol,
-                });
+            for (symbol, target_entry) in targets {
+                if symbol != from_unit {
+                    // Math: Target = (Base / Factor) - Offset
+                    let target_val = (base_value / target_entry.factor) - target_entry.offset;
+                    outputs.push(ConvertedValue {
+                        value: target_val,
+                        unit: symbol,
+                    });
+                }
             }
         }
 
@@ -480,6 +622,31 @@ fn extract_metric_prefix(input: &str) -> Option<(f64, &str)> {
     )
 }
 
+/// Splits a compound/rate unit such as `USD/kg` into its numerator and
+/// denominator fragments. Rejects anything without exactly one `/` separator
+/// bounded by non-empty sides.
+fn decompose_compound(unit: &str) -> Option<(&str, &str)> {
+    let (numerator, denominator) = unit.split_once('/')?;
+    let numerator = numerator.trim();
+    let denominator = denominator.trim();
+    if numerator.is_empty() || denominator.is_empty() {
+        return None;
+    }
+    Some((numerator, denominator))
+}
+
+/// Splits a leading integer count off a fragment such as the `100` in
+/// `kWh/100km`, returning `(count, rest)`.
+fn leading_count_factor(fragment: &str) -> Option<(f64, &str)> {
+    let digits_end = fragment.find(|c: char| !c.is_ascii_digit())?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "unit scale counts stay far below f64's exact-integer range"
+    )]
+    let count = fragment[..digits_end].parse::<u64>().ok()? as f64;
+    Some((count, &fragment[digits_end..]))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -548,6 +715,110 @@ mod tests {
         // Target = (Base / Factor) - Offset
         // Target_USD = (10.0 / (1.0/1.1)) - 0 = 11.0
         assert_relative_eq(usd.value, 11.0);
+    }
+
+    #[test]
+    fn usd_per_kg_converts_to_usd_per_lb_via_denominator_factors() {
+        let db = create_test_db();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+        let converter = Converter::new(Config::default(), db);
+
+        let res = converter.convert(10.0, "USD/kg").unwrap();
+        // The currency factor cancels: 10 USD/kg = 10 * (lb-factor / kg-factor).
+        let per_lb = res.outputs.iter().find(|o| o.unit == "USD/lb").unwrap();
+        assert_relative_eq(per_lb.value, 10.0 * 453.592_37 / 1000.0);
+    }
+
+    #[test]
+    fn compound_wage_tracks_the_live_cross_currency_rate() {
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+        let converter = Converter::new(Config::default(), db);
+
+        let res = converter.convert(10.0, "USD/h").unwrap();
+        let per_hour_eur = res.outputs.iter().find(|o| o.unit == "EUR/h").unwrap();
+        assert_relative_eq(per_hour_eur.value, 10.0 / 1.1);
+    }
+
+    #[test]
+    fn energy_per_distance_handles_the_counted_denominator() {
+        let converter = Converter::new(Config::default(), create_test_db());
+
+        // 10 kWh/100km = 10 * 1609.344 / 100_000 kWh/mi
+        let res = converter.convert(10.0, "kWh/100km").unwrap();
+        let per_mi = res.outputs.iter().find(|o| o.unit == "kWh/mi").unwrap();
+        assert_relative_eq(per_mi.value, 10.0 * 1609.344 / 100_000.0);
+    }
+
+    #[test]
+    fn lowercase_compound_alias_resolves_like_the_canonical_symbol() {
+        let db = create_test_db();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+        let converter = Converter::new(Config::default(), db);
+
+        let res = converter.convert(10.0, "usd/kg").unwrap();
+        assert!(res.outputs.iter().any(|o| o.unit == "USD/lb"));
+    }
+
+    #[test]
+    fn explicit_target_pins_a_sibling_compound_unit() {
+        let db = create_test_db();
+        db.update_unit("EUR", 1.0, 0.0, UnitCategory::Currency, RateSource::Fiat)
+            .unwrap();
+        db.update_unit(
+            "USD",
+            1.0 / 1.1,
+            0.0,
+            UnitCategory::Currency,
+            RateSource::Fiat,
+        )
+        .unwrap();
+        let converter = Converter::new(Config::default(), db);
+
+        let res = converter
+            .convert_preferring(10.0, "USD/kg", Some("EUR/kg"))
+            .unwrap();
+        assert_eq!(res.outputs.first().map(|o| o.unit.as_str()), Some("EUR/kg"));
+        assert_relative_eq(res.outputs[0].value, 10.0 / 1.1);
+    }
+
+    #[test]
+    fn temperature_denominator_is_rejected_instead_of_misconverting() {
+        let converter = Converter::new(Config::default(), create_test_db());
+
+        let res = converter.convert(10.0, "USD/C");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn unknown_component_falls_back_to_unknown_unit_error() {
+        let converter = Converter::new(Config::default(), create_test_db());
+
+        let res = converter.convert(10.0, "foo/bar");
+        assert!(res.is_err());
     }
 
     #[test]
